@@ -1,0 +1,11 @@
+.work/
+*.o
+*.so
+*.dll
+*.tar.gz
+*.Rcheck/
+.Rhistory
+.RData
+/src/Makevars
+/*.sas7bdat
+/*.sas7bcat

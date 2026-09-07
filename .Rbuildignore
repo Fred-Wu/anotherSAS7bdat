@@ -1,0 +1,8 @@
+^\.work$
+^\.git.*$
+^.*\.Rcheck$
+^.*\.tar\.gz$
+^src/.*\.(o|so|dll)$
+^src/Makevars$
+^[^/]+\.sas7bdat$
+^[^/]+\.sas7bcat$

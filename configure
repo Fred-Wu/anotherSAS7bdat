@@ -1,0 +1,40 @@
+#!/bin/sh
+# Detect native iconv for Unix builds. Windows uses Makevars.win and the
+# raw libiconv entry points exported by Riconv.dll.
+set -eu
+cc=$("${R_HOME}/bin/R" CMD config CC)
+cflags=$("${R_HOME}/bin/R" CMD config CFLAGS)
+cppflags=$("${R_HOME}/bin/R" CMD config CPPFLAGS)
+ldflags=$("${R_HOME}/bin/R" CMD config LDFLAGS)
+trap 'rm -f conftest.c conftest conftest.o' EXIT HUP INT TERM
+
+cat > conftest.c <<'EOF'
+#include <iconv.h>
+int main(void) {
+    iconv_t converter = iconv_open("UTF-8", "UTF-8");
+    return iconv_close(converter);
+}
+EOF
+iconv_libs=""
+if ! eval "$cc $cppflags $cflags conftest.c $ldflags -o conftest" >/dev/null 2>&1; then
+    iconv_libs="-liconv"
+    if ! eval "$cc $cppflags $cflags conftest.c $ldflags -o conftest $iconv_libs" >/dev/null 2>&1; then
+        echo "Native iconv headers/library were not found. Install your platform's iconv development library."
+        exit 1
+    fi
+fi
+
+cat > conftest.c <<'EOF'
+#include <iconv.h>
+int main(void) {
+    size_t (*convert)(iconv_t, const char **, size_t *, char **, size_t *) = iconv;
+    return convert == 0;
+}
+EOF
+iconv_const=""
+if eval "$cc $cppflags $cflags -Werror conftest.c $ldflags -o conftest $iconv_libs" >/dev/null 2>&1; then
+    iconv_const="const"
+fi
+sed -e "s/@ICONV_LIBS@/$iconv_libs/g" -e "s/@ICONV_CONST@/$iconv_const/g" \
+    src/Makevars.in > src/Makevars
+echo "Using native iconv (libraries: ${iconv_libs:-libc}, const input: ${iconv_const:-no})"

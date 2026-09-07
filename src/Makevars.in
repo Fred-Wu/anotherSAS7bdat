@@ -1,0 +1,18 @@
+CXX_STD = CXX17
+PKG_CPPFLAGS = -D_FILE_OFFSET_BITS=64 -DICONV_CONST=@ICONV_CONST@
+PKG_CXXFLAGS = -pthread
+PKG_LIBS = -pthread @ICONV_LIBS@
+
+OBJECTS = RcppExports.o reader.o \
+  readstat/readstat_bits.o readstat/readstat_convert.o \
+  readstat/readstat_error.o readstat/readstat_io_unistd.o \
+  readstat/readstat_malloc.o readstat/readstat_metadata.o \
+  readstat/readstat_parser.o readstat/readstat_value.o \
+  readstat/readstat_variable.o readstat/readstat_writer.o \
+  readstat/sas/readstat_sas.o readstat/sas/readstat_sas7bdat_read.o \
+  readstat/sas/readstat_sas_rle.o
+
+all: $(SHLIB)
+
+clean:
+	rm -f $(OBJECTS) $(SHLIB)

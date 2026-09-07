@@ -1,0 +1,19 @@
+Package: AnotherSAS7bdat
+Title: Read SAS Data in Continuous Memory-Bounded Chunks
+Version: 0.0.2
+Authors@R: person("AnotherSAS7bdat", "contributors", role = c("aut", "cre"),
+    email = "maintainer@example.com")
+Description: Reads SAS 'sas7bdat' files through a persistent native reader.
+    Processes configurable chunks without reopening the input or restarting
+    the parser between chunks. Supports uncompressed, run-length encoded,
+    and Ross Data Compression data through the bundled 'ReadStat' library.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 4.1.0)
+Imports: Rcpp
+LinkingTo: Rcpp
+Suggests: testthat (>= 3.0.0), haven
+SystemRequirements: C++17, POSIX threads, iconv
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.0
+Roxygen: list(markdown = TRUE)
