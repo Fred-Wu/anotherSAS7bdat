@@ -1,15 +1,15 @@
 test_that("readable byte targets have explicit binary and decimal units", {
-  expect_equal(AnotherSAS7bdat:::byte_limit("128 MiB"), 128 * 1024^2)
-  expect_equal(AnotherSAS7bdat:::byte_limit("128 MB"), 128 * 1000^2)
-  expect_equal(AnotherSAS7bdat:::byte_limit(" 1.5 mib "), 1.5 * 1024^2)
-  expect_equal(AnotherSAS7bdat:::byte_limit(".5 KiB"), 512)
-  expect_equal(AnotherSAS7bdat:::byte_limit("1GB"), 1000^3)
-  expect_equal(AnotherSAS7bdat:::byte_limit("1 GiB"), 1024^3)
-  expect_equal(AnotherSAS7bdat:::byte_limit(134217728), 128 * 1024^2)
+  expect_equal(anotherSAS7bdat:::byte_limit("128 MiB"), 128 * 1024^2)
+  expect_equal(anotherSAS7bdat:::byte_limit("128 MB"), 128 * 1000^2)
+  expect_equal(anotherSAS7bdat:::byte_limit(" 1.5 mib "), 1.5 * 1024^2)
+  expect_equal(anotherSAS7bdat:::byte_limit(".5 KiB"), 512)
+  expect_equal(anotherSAS7bdat:::byte_limit("1GB"), 1000^3)
+  expect_equal(anotherSAS7bdat:::byte_limit("1 GiB"), 1024^3)
+  expect_equal(anotherSAS7bdat:::byte_limit(134217728), 128 * 1024^2)
   for (x in list("128", "0 MiB", "-1 MiB", "one MB", "Inf MB", "1 megabyte",
                  "1e300 GB", "0.1 B", NA_character_, c("1 MB", "2 MB"),
                  list("1 MB"), "9007199254740992 B")) {
-    expect_error(AnotherSAS7bdat:::byte_limit(x), "chunk_bytes")
+    expect_error(anotherSAS7bdat:::byte_limit(x), "chunk_bytes")
   }
 })
 

@@ -38,10 +38,13 @@ sas7bdat_info(reader)
 
 \item{callback}{A function whose first argument receives each chunk as a data frame.}
 
-\item{chunk_rows}{A positive whole number specifying the maximum rows per chunk.}
+\item{chunk_rows}{A positive whole number specifying the maximum rows per chunk.
+Fewer rows are returned when the \code{chunk_bytes} target is reached first or
+when fewer rows remain in the file.}
 
-\item{chunk_bytes}{Approximate decoded chunk size, as a numeric byte count or
-a size string with units B, KB, MB, GB, KiB, MiB, or GiB (case-insensitive).}
+\item{chunk_bytes}{Approximate decoded size target for each chunk, as a
+numeric byte count or a size string with units B, KB, MB, GB, KiB, MiB,
+or GiB (case-insensitive).}
 
 \item{columns}{A character vector of column names, or \code{NULL} for all columns.}
 
@@ -54,7 +57,8 @@ date/time formats to R date/time classes.}
 \item{reader}{A \code{sas7bdat_reader} object created by \code{sas7bdat_open()}.}
 
 \item{n}{A positive whole number specifying the maximum rows for this read,
-or \code{NULL} to use the reader's \code{chunk_rows}.}
+or \code{NULL} to use the reader's \code{chunk_rows}. The reader's \code{chunk_bytes}
+target still applies.}
 }
 \value{
 \itemize{
@@ -119,9 +123,18 @@ unsupported.
 Column names are case-sensitive and must be unique. Output columns follow
 the requested order. Returned text is converted to UTF-8.
 
-Reading ends each chunk at the first row or byte target reached, after a
-complete row. The final chunk may be smaller. The byte target is approximate
-and is not a limit on total R memory usage; a single row may exceed it.
+\code{chunk_rows} sets an upper limit on rows per chunk. Each chunk ends after
+a complete row when either the row limit or the approximate decoded size
+target, \code{chunk_bytes}, is reached. If the byte target is reached first,
+the chunk contains fewer than \code{chunk_rows} rows, even before the end of
+the file. Row counts can vary between chunks as decoded row sizes vary.
+For \code{sas7bdat_read_chunk()}, supplying \code{n} overrides the row limit for that
+call; the byte target remains in effect. The final chunk may also contain
+fewer rows if fewer remain in the file.
+
+The byte target is approximate and may be exceeded by the last row added
+to a chunk. It is not a limit on total R memory usage; even a single row
+may exceed the target.
 MB and GB use powers of 1,000; MiB and GiB use powers of 1,024.
 
 SAS numerics are doubles. Special missing values use haven-compatible tagged
@@ -133,6 +146,9 @@ physical observations are rejected in this version, before counter overflow.
 To retain the entire dataset, you must explicitly save the chunks and
 combine them, as shown below. The entire decoded dataset
 and temporary copies must then fit in memory.
+For faster binding of many chunks, use \code{data.table::rbindlist()} from the
+optional data.table package in place of \code{do.call(rbind, chunks)}.
+It returns a \code{data.table}, which also inherits from \code{data.frame}.
 }
 \section{Closing and stopping}{
 
@@ -164,7 +180,7 @@ SAS is not needed to read the bundled files.
 \examples{
 # Read the entire file into sas_data using a callback.
 path <- system.file("examples", "example_uncompressed.sas7bdat",
-                    package = "AnotherSAS7bdat")
+                    package = "anotherSAS7bdat")
 chunks <- list()
 
 sas7bdat_read(
@@ -176,11 +192,13 @@ sas7bdat_read(
 )
 
 sas_data <- do.call(rbind, chunks)
+# Faster alternative with data.table installed:
+# sas_data <- data.table::rbindlist(chunks, use.names = TRUE)
 rm(chunks)
 
 # Read the entire RLE-compressed file using a reader.
 path <- system.file("examples", "example_rle.sas7bdat",
-                    package = "AnotherSAS7bdat")
+                    package = "anotherSAS7bdat")
 reader <- sas7bdat_open(path, chunk_rows = 25)
 chunks <- list()
 
@@ -193,6 +211,8 @@ repeat {
 sas7bdat_close(reader)
 
 sas_data <- do.call(rbind, chunks)
+# Faster alternative with data.table installed:
+# sas_data <- data.table::rbindlist(chunks, use.names = TRUE)
 rm(chunks)
 sas7bdat_info(reader)$status  # "closed"
 }

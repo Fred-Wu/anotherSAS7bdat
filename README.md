@@ -1,8 +1,8 @@
-# AnotherSAS7bdat
+# anotherSAS7bdat
 
 ## Overview
 
-AnotherSAS7bdat reads SAS `.sas7bdat` files into R in configurable chunks using
+anotherSAS7bdat reads SAS `.sas7bdat` files into R in configurable chunks using
 the [ReadStat](https://github.com/WizardMac/ReadStat) C library by
 [Evan Miller](https://www.evanmiller.org/). Each file is opened once, and reading
 continues between chunks without restarting the parser. Each chunk is an R
@@ -14,7 +14,7 @@ Install the development version from GitHub:
 
 ```r
 # install.packages("remotes")
-remotes::install_github("Fred-Wu/AnotherSAS7bdat")
+remotes::install_github("Fred-Wu/anotherSAS7bdat")
 ```
 
 Source installation requires Rtools on Windows, or C++ build tools on macOS
@@ -36,13 +36,18 @@ read the bundled files.
 Both examples below read the entire file into `sas_data`, an R data frame.
 The complete dataset and temporary chunks must fit in memory.
 
+For faster binding of many chunks, use
+[`data.table::rbindlist()`](https://rdatatable.gitlab.io/data.table/reference/rbindlist.html)
+from the optional **data.table** package in place of `do.call(rbind, chunks)`.
+It returns a `data.table`, which also inherits from `data.frame`.
+
 Using `sas7bdat_read()`:
 
 ```r
-library(AnotherSAS7bdat)
+library(anotherSAS7bdat)
 
 path <- system.file("examples", "example_uncompressed.sas7bdat",
-                    package = "AnotherSAS7bdat")
+                    package = "anotherSAS7bdat")
 chunks <- list()
 
 sas7bdat_read(
@@ -54,6 +59,8 @@ sas7bdat_read(
 )
 
 sas_data <- do.call(rbind, chunks)
+# Faster alternative with data.table installed:
+# sas_data <- data.table::rbindlist(chunks, use.names = TRUE)
 rm(chunks)
 ```
 
@@ -63,10 +70,10 @@ The callback stores each data frame in `chunks`; `rbind` combines them into
 Using `sas7bdat_open()` and `sas7bdat_read_chunk()`:
 
 ```r
-library(AnotherSAS7bdat)
+library(anotherSAS7bdat)
 
 path <- system.file("examples", "example_rle.sas7bdat",
-                    package = "AnotherSAS7bdat")
+                    package = "anotherSAS7bdat")
 reader <- sas7bdat_open(path, chunk_rows = 25)
 chunks <- list()
 
@@ -79,6 +86,8 @@ repeat {
 sas7bdat_close(reader)
 
 sas_data <- do.call(rbind, chunks)
+# Faster alternative with data.table installed:
+# sas_data <- data.table::rbindlist(chunks, use.names = TRUE)
 rm(chunks)
 ```
 

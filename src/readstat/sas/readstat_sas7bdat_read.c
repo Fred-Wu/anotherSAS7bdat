@@ -265,7 +265,7 @@ static readstat_error_t sas7bdat_parse_row_size_subheader(const char *subheader,
         retval = READSTAT_ERROR_PARSE;
         goto cleanup;
     }
-    /* AnotherSAS7bdat: the public value callback has an int row index.
+    /* anotherSAS7bdat: the public value callback has an int row index.
      * Reject before the upstream uint32_t counters can truncate or overflow. */
     if (total_row_count > INT_MAX) {
         if (ctx->handle.error)

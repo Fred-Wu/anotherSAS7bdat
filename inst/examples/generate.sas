@@ -1,4 +1,4 @@
-/* Synthetic example data for AnotherSAS7bdat; no external data are used.
+/* Synthetic example data for anotherSAS7bdat; no external data are used.
    Run this program from this directory in a SAS Unicode (UTF-8) session.
    On Windows, start SAS with -config "<SASROOT>/nls/u8/sasv9.cfg".
    The three files contain the same 120 rows and eight columns. */

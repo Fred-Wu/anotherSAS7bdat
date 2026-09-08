@@ -12,7 +12,7 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 
 // native_open
 SEXP native_open(std::string path, std::vector<std::string> columns, std::string encoding, double bytes);
-RcppExport SEXP _AnotherSAS7bdat_native_open(SEXP pathSEXP, SEXP columnsSEXP, SEXP encodingSEXP, SEXP bytesSEXP) {
+RcppExport SEXP _anotherSAS7bdat_native_open(SEXP pathSEXP, SEXP columnsSEXP, SEXP encodingSEXP, SEXP bytesSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -26,7 +26,7 @@ END_RCPP
 }
 // native_next
 SEXP native_next(SEXP ptr, int n);
-RcppExport SEXP _AnotherSAS7bdat_native_next(SEXP ptrSEXP, SEXP nSEXP) {
+RcppExport SEXP _anotherSAS7bdat_native_next(SEXP ptrSEXP, SEXP nSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -38,7 +38,7 @@ END_RCPP
 }
 // native_close
 void native_close(SEXP ptr);
-RcppExport SEXP _AnotherSAS7bdat_native_close(SEXP ptrSEXP) {
+RcppExport SEXP _anotherSAS7bdat_native_close(SEXP ptrSEXP) {
 BEGIN_RCPP
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
@@ -48,7 +48,7 @@ END_RCPP
 }
 // native_info
 Rcpp::List native_info(SEXP ptr);
-RcppExport SEXP _AnotherSAS7bdat_native_info(SEXP ptrSEXP) {
+RcppExport SEXP _anotherSAS7bdat_native_info(SEXP ptrSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -59,14 +59,14 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_AnotherSAS7bdat_native_open", (DL_FUNC) &_AnotherSAS7bdat_native_open, 4},
-    {"_AnotherSAS7bdat_native_next", (DL_FUNC) &_AnotherSAS7bdat_native_next, 2},
-    {"_AnotherSAS7bdat_native_close", (DL_FUNC) &_AnotherSAS7bdat_native_close, 1},
-    {"_AnotherSAS7bdat_native_info", (DL_FUNC) &_AnotherSAS7bdat_native_info, 1},
+    {"_anotherSAS7bdat_native_open", (DL_FUNC) &_anotherSAS7bdat_native_open, 4},
+    {"_anotherSAS7bdat_native_next", (DL_FUNC) &_anotherSAS7bdat_native_next, 2},
+    {"_anotherSAS7bdat_native_close", (DL_FUNC) &_anotherSAS7bdat_native_close, 1},
+    {"_anotherSAS7bdat_native_info", (DL_FUNC) &_anotherSAS7bdat_native_info, 1},
     {NULL, NULL, 0}
 };
 
-RcppExport void R_init_AnotherSAS7bdat(DllInfo *dll) {
+RcppExport void R_init_anotherSAS7bdat(DllInfo *dll) {
     R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
     R_useDynamicSymbols(dll, FALSE);
 }

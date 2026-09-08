@@ -8,8 +8,11 @@
 #' @param path A character string specifying the path to a local `.sas7bdat` file.
 #' @param callback A function whose first argument receives each chunk as a data frame.
 #' @param chunk_rows A positive whole number specifying the maximum rows per chunk.
-#' @param chunk_bytes Approximate decoded chunk size, as a numeric byte count or
-#'   a size string with units B, KB, MB, GB, KiB, MiB, or GiB (case-insensitive).
+#'   Fewer rows are returned when the `chunk_bytes` target is reached first or
+#'   when fewer rows remain in the file.
+#' @param chunk_bytes Approximate decoded size target for each chunk, as a
+#'   numeric byte count or a size string with units B, KB, MB, GB, KiB, MiB,
+#'   or GiB (case-insensitive).
 #' @param columns A character vector of column names, or `NULL` for all columns.
 #' @param encoding A character string specifying the source encoding, or `NULL`
 #'   to use the encoding recorded in the file.
@@ -17,7 +20,8 @@
 #'   date/time formats to R date/time classes.
 #' @param reader A `sas7bdat_reader` object created by `sas7bdat_open()`.
 #' @param n A positive whole number specifying the maximum rows for this read,
-#'   or `NULL` to use the reader's `chunk_rows`.
+#'   or `NULL` to use the reader's `chunk_rows`. The reader's `chunk_bytes`
+#'   target still applies.
 #' @return
 #' * `sas7bdat_read()` returns an invisible reading summary: `rows` is the
 #'   number of rows passed to the callback, `chunks` is the number of calls,
@@ -81,9 +85,18 @@
 #'   Column names are case-sensitive and must be unique. Output columns follow
 #'   the requested order. Returned text is converted to UTF-8.
 #'
-#'   Reading ends each chunk at the first row or byte target reached, after a
-#'   complete row. The final chunk may be smaller. The byte target is approximate
-#'   and is not a limit on total R memory usage; a single row may exceed it.
+#'   `chunk_rows` sets an upper limit on rows per chunk. Each chunk ends after
+#'   a complete row when either the row limit or the approximate decoded size
+#'   target, `chunk_bytes`, is reached. If the byte target is reached first,
+#'   the chunk contains fewer than `chunk_rows` rows, even before the end of
+#'   the file. Row counts can vary between chunks as decoded row sizes vary.
+#'   For `sas7bdat_read_chunk()`, supplying `n` overrides the row limit for that
+#'   call; the byte target remains in effect. The final chunk may also contain
+#'   fewer rows if fewer remain in the file.
+#'
+#'   The byte target is approximate and may be exceeded by the last row added
+#'   to a chunk. It is not a limit on total R memory usage; even a single row
+#'   may exceed the target.
 #'   MB and GB use powers of 1,000; MiB and GiB use powers of 1,024.
 #'
 #'   SAS numerics are doubles. Special missing values use haven-compatible tagged
@@ -95,6 +108,9 @@
 #'   To retain the entire dataset, you must explicitly save the chunks and
 #'   combine them, as shown below. The entire decoded dataset
 #'   and temporary copies must then fit in memory.
+#'   For faster binding of many chunks, use `data.table::rbindlist()` from the
+#'   optional data.table package in place of `do.call(rbind, chunks)`.
+#'   It returns a `data.table`, which also inherits from `data.frame`.
 #'
 #' @section Example files:
 #' The package includes three files generated with SAS 9.4:
@@ -111,7 +127,7 @@
 #' @examples
 #' # Read the entire file into sas_data using a callback.
 #' path <- system.file("examples", "example_uncompressed.sas7bdat",
-#'                     package = "AnotherSAS7bdat")
+#'                     package = "anotherSAS7bdat")
 #' chunks <- list()
 #'
 #' sas7bdat_read(
@@ -123,11 +139,13 @@
 #' )
 #'
 #' sas_data <- do.call(rbind, chunks)
+#' # Faster alternative with data.table installed:
+#' # sas_data <- data.table::rbindlist(chunks, use.names = TRUE)
 #' rm(chunks)
 #'
 #' # Read the entire RLE-compressed file using a reader.
 #' path <- system.file("examples", "example_rle.sas7bdat",
-#'                     package = "AnotherSAS7bdat")
+#'                     package = "anotherSAS7bdat")
 #' reader <- sas7bdat_open(path, chunk_rows = 25)
 #' chunks <- list()
 #'
@@ -140,6 +158,8 @@
 #' sas7bdat_close(reader)
 #'
 #' sas_data <- do.call(rbind, chunks)
+#' # Faster alternative with data.table installed:
+#' # sas_data <- data.table::rbindlist(chunks, use.names = TRUE)
 #' rm(chunks)
 #' sas7bdat_info(reader)$status  # "closed"
 sas7bdat_read <- function(path, callback, chunk_rows = 100000L,

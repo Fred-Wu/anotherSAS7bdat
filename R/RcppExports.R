@@ -2,18 +2,18 @@
 # Generator token: 10BE3573-1514-4C36-9D1C-5A225CD40393
 
 native_open <- function(path, columns, encoding, bytes) {
-    .Call(`_AnotherSAS7bdat_native_open`, path, columns, encoding, bytes)
+    .Call(`_anotherSAS7bdat_native_open`, path, columns, encoding, bytes)
 }
 
 native_next <- function(ptr, n) {
-    .Call(`_AnotherSAS7bdat_native_next`, ptr, n)
+    .Call(`_anotherSAS7bdat_native_next`, ptr, n)
 }
 
 native_close <- function(ptr) {
-    invisible(.Call(`_AnotherSAS7bdat_native_close`, ptr))
+    invisible(.Call(`_anotherSAS7bdat_native_close`, ptr))
 }
 
 native_info <- function(ptr) {
-    .Call(`_AnotherSAS7bdat_native_info`, ptr)
+    .Call(`_anotherSAS7bdat_native_info`, ptr)
 }
 

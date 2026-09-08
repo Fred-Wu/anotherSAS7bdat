@@ -346,7 +346,7 @@ private:
 };
 
 Reader& get_reader(SEXP ptr) {
-    if (TYPEOF(ptr) != EXTPTRSXP || R_ExternalPtrTag(ptr) != Rf_install("AnotherSAS7bdat_reader"))
+    if (TYPEOF(ptr) != EXTPTRSXP || R_ExternalPtrTag(ptr) != Rf_install("anotherSAS7bdat_reader"))
         Rcpp::stop("Invalid SAS reader pointer.");
     auto* reader = static_cast<Reader*>(R_ExternalPtrAddr(ptr));
     if (!reader) Rcpp::stop("The SAS reader pointer is no longer valid (readers cannot be serialized).");
@@ -374,7 +374,7 @@ SEXP native_open(std::string path, std::vector<std::string> columns, std::string
     std::unique_ptr<Reader> reader(new Reader(std::move(path), std::move(columns), std::move(encoding), bytes));
     reader->start();
     reader->await_schema();
-    Rcpp::XPtr<Reader> ptr(reader.get(), true, Rf_install("AnotherSAS7bdat_reader"));
+    Rcpp::XPtr<Reader> ptr(reader.get(), true, Rf_install("anotherSAS7bdat_reader"));
     reader.release();
     return ptr;
 }

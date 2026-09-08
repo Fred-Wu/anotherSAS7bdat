@@ -1,3 +1,3 @@
 library(testthat)
-library(AnotherSAS7bdat)
-test_check("AnotherSAS7bdat")
+library(anotherSAS7bdat)
+test_check("anotherSAS7bdat")
