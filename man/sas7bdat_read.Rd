@@ -52,7 +52,10 @@ or GiB (case-insensitive).}
 to use the encoding recorded in the file.}
 
 \item{dates}{A logical value indicating whether to convert recognized SAS
-date/time formats to R date/time classes.}
+date/time formats to R date/time classes. Dates become \code{Date}, datetimes
+become \code{POSIXct} in UTC, and times become \code{hms} values displayed as
+\code{HH:MM:SS} (with fractional seconds when present). Set to \code{FALSE} to
+retain the raw SAS numeric values.}
 
 \item{reader}{A \code{sas7bdat_reader} object created by \code{sas7bdat_open()}.}
 

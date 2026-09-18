@@ -14,6 +14,7 @@ Reads SAS 'sas7bdat' files through a persistent native reader. Processes configu
 Authors:
 \itemize{
   \item anotherSAS7bdat contributors \email{maintainer@example.com}
+  \item Evan Miller [cph] (Author of included ReadStat code)
 }
 
 }

@@ -17,7 +17,10 @@
 #' @param encoding A character string specifying the source encoding, or `NULL`
 #'   to use the encoding recorded in the file.
 #' @param dates A logical value indicating whether to convert recognized SAS
-#'   date/time formats to R date/time classes.
+#'   date/time formats to R date/time classes. Dates become `Date`, datetimes
+#'   become `POSIXct` in UTC, and times become `hms` values displayed as
+#'   `HH:MM:SS` (with fractional seconds when present). Set to `FALSE` to
+#'   retain the raw SAS numeric values.
 #' @param reader A `sas7bdat_reader` object created by `sas7bdat_open()`.
 #' @param n A positive whole number specifying the maximum rows for this read,
 #'   or `NULL` to use the reader's `chunk_rows`. The reader's `chunk_bytes`
@@ -246,8 +249,10 @@ sas7bdat_read_chunk <- function(reader, n = NULL) {
       attr(x, "tzone") <- "UTC"
     }
     if (kind == "time") {
-      class(x) <- "difftime"
-      attr(x, "units") <- "secs"
+      # Construct from bare doubles, then restore the SAS column metadata.
+      x <- hms::new_hms(as.numeric(x))
+      attr(x, "format.sas") <- fmt
+      attr(x, "label") <- attr(chunk[[j]], "label", exact = TRUE)
     }
     chunk[[j]] <- x
   }
