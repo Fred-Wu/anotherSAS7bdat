@@ -39,7 +39,8 @@
 #'   (`open`, `eof`, `error`, or `closed`). `eof` means end of file. Additional
 #'   diagnostic counters are `rows_decoded`, `file_opens`, `file_closes`,
 #'   `bytes_read`, and `seeks`. Byte and seek counters include metadata setup;
-#'   they do not measure R memory use.
+#'   they do not measure R memory use. With read-ahead, `rows_decoded` can be
+#'   greater than `rows_delivered`.
 #' * `sas7bdat_close()` returns `NULL`, invisibly.
 #'
 #' @section Closing and stopping:
@@ -85,6 +86,14 @@
 #'   detected automatically. The file must be seekable; ZIP/gzip wrappers are
 #'   unsupported.
 #'
+#'   After the first chunk request, a native worker decodes ahead while R
+#'   converts or processes earlier chunks. Read-ahead is bounded to one queued
+#'   batch and one in-progress batch, each limited by `chunk_bytes` and the row
+#'   count requested when that batch starts. Changing `n` takes effect on output
+#'   chunks even when data has already been decoded. Closing cancels the worker
+#'   and discards unread data. Returned data frames own their values and remain
+#'   valid when native buffers are reused.
+#'
 #'   Column names are case-sensitive and must be unique. Output columns follow
 #'   the requested order. Returned text is converted to UTF-8.
 #'
@@ -100,6 +109,9 @@
 #'   The byte target is approximate and may be exceeded by the last row added
 #'   to a chunk. It is not a limit on total R memory usage; even a single row
 #'   may exceed the target.
+#'   Native buffers for read-ahead and the output chunk can coexist, as can
+#'   earlier data frames retained by your callback. Reusable native buffers
+#'   retain their allocated capacity until the reader is closed.
 #'   MB and GB use powers of 1,000; MiB and GiB use powers of 1,024.
 #'
 #'   SAS numerics are doubles. Special missing values use haven-compatible tagged

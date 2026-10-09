@@ -1,9 +1,11 @@
 #include <Rcpp.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cctype>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -20,6 +22,7 @@ extern "C" {
 namespace {
 
 std::string text_or_empty(const char* value) { return value ? value : ""; }
+double missing_value(unsigned char code);
 
 struct Column {
     std::string name, label, format;
@@ -30,20 +33,54 @@ struct Column {
 
 struct Values {
     std::vector<double> numbers;
-    std::vector<unsigned char> missing;
-    std::vector<std::string> strings;
+    // One arena per character column, with NUL-terminated cells and offsets.
+    std::vector<char> text;
+    std::vector<size_t> offsets;
 };
 
 struct Batch {
     std::vector<Values> columns;
     int rows = 0;
     uint64_t bytes = 0;
+    std::vector<uint64_t> row_ends;
     explicit Batch(size_t n) : columns(n) {}
+
+    void reset(const std::vector<Column>& schema, size_t capacity) {
+        rows = 0;
+        bytes = 0;
+        row_ends.clear();
+        row_ends.reserve(capacity);
+        for (size_t i = 0; i < schema.size(); ++i) {
+            auto& values = columns[i];
+            if (schema[i].string) {
+                values.text.clear();
+                values.offsets.clear();
+                values.offsets.reserve(capacity + 1);
+                values.offsets.push_back(0);
+                // Avoid reserving the full declared SAS width for sparse text.
+                values.text.reserve(capacity * std::min<size_t>(schema[i].width + 1, 64));
+            } else {
+                values.numbers.clear();
+                values.numbers.reserve(capacity);
+            }
+        }
+    }
+};
+
+struct Slice {
+    const Batch* batch;
+    int begin, end;
+};
+
+struct Delivery {
+    std::vector<Slice> slices;
+    int rows = 0;
 };
 
 // Only the main thread creates/accesses R objects. The worker owns ReadStat,
-// its file descriptor, and the in-progress batch. There is no read-ahead queue:
-// the worker waits at every batch boundary for the next explicit request.
+// its file descriptor, and the in-progress batch. One queued batch plus one
+// in-progress batch can run ahead of R. Delivered buffers return to a small
+// reuse pool only after conversion finishes; returned R objects own their data.
 class Reader {
 public:
     const std::string path, encoding;
@@ -59,11 +96,21 @@ public:
 
     Reader(std::string p, std::vector<std::string> names, std::string enc, double bytes)
         : path(std::move(p)), encoding(std::move(enc)), selected_names(std::move(names)),
-          byte_target(static_cast<uint64_t>(bytes)) { file.fd = -1; }
+          byte_target(static_cast<uint64_t>(bytes)) {
+        file.fd = -1;
+        recycled.reserve(2);
+        // Read R's NA payload only on the main thread, before starting ReadStat.
+        for (int i = 0; i < 256; ++i) missing_values[i] = missing_value(i);
+    }
 
     ~Reader() { close(); }
 
     void start() { worker = std::thread(&Reader::run, this); }
+
+    void check_interrupt() {
+        try { Rcpp::checkUserInterrupt(); }
+        catch (...) { close(); throw; }
+    }
 
     void await_schema() {
         std::unique_lock<std::mutex> lock(mutex);
@@ -72,25 +119,59 @@ public:
         if (!schema_ready) throw std::runtime_error("SAS metadata was not available.");
     }
 
-    Batch* next(int n) {
+    Delivery next(int n) {
         std::unique_lock<std::mutex> lock(mutex);
         if (closed) throw std::runtime_error("The SAS reader is closed.");
-        if (ready) return ready.get();
-        if (!done) {
-            requested_rows = n;
-            requested = true;
-            cv.notify_all();
-            wait_main(lock, [this] { return ready || done; });
+        requested_rows = n;
+        requested = true;
+        cv.notify_all();
+        Delivery result;
+        uint64_t bytes = 0;
+        size_t index = 0;
+        int begin = pending_offset;
+        while (result.rows < n && bytes < byte_target) {
+            if (index == pending.size()) {
+                wait_main(lock, [this] { return ready || done; });
+                if (!ready) {
+                    // Completed batches remain readable before a later error.
+                    if (failure && result.rows == 0) std::rethrow_exception(failure);
+                    break;
+                }
+                pending.push_back(std::move(ready));
+                cv.notify_all();
+            }
+            const Batch& batch = *pending[index];
+            int end = begin + std::min(batch.rows - begin, n - result.rows);
+            uint64_t base = begin == 0 ? 0 : batch.row_ends[begin - 1];
+            // Split or combine prefetched batches when n changes. The byte
+            // target still ends at the first complete row that reaches it.
+            auto stop = std::lower_bound(batch.row_ends.begin() + begin,
+                batch.row_ends.begin() + end, base + byte_target - bytes);
+            if (stop != batch.row_ends.begin() + end)
+                end = static_cast<int>(stop - batch.row_ends.begin()) + 1;
+            result.slices.push_back({&batch, begin, end});
+            result.rows += end - begin;
+            bytes += batch.row_ends[end - 1] - base;
+            ++index;
+            begin = 0;
         }
-        if (ready) return ready.get();
-        if (failure) std::rethrow_exception(failure);
-        return nullptr;
+        return result;
     }
 
-    void consume() {
+    void consume(int rows) {
         std::lock_guard<std::mutex> lock(mutex);
-        delivered += ready->rows;
-        ready.reset();
+        delivered += rows;
+        while (rows > 0) {
+            int count = std::min(rows, pending.front()->rows - pending_offset);
+            pending_offset += count;
+            rows -= count;
+            if (pending_offset == pending.front()->rows) {
+                if (recycled.size() < 2) recycled.push_back(std::move(pending.front()));
+                pending.pop_front();
+                pending_offset = 0;
+            }
+        }
+        cv.notify_all();
     }
 
     void close() noexcept {
@@ -101,6 +182,8 @@ public:
         cv.notify_all();
         if (worker.joinable()) worker.join();
         ready.reset();
+        pending.clear();
+        recycled.clear();
         current.reset();
         closed = true;
     }
@@ -109,7 +192,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         if (closed) return "closed";
         if (failure) return "error";
-        return done && !ready ? "eof" : "open";
+        return done && !ready && pending.empty() ? "eof" : "open";
     }
 
 private:
@@ -122,6 +205,15 @@ private:
     std::vector<Column> source_columns;
     std::vector<int> source_to_output;
     std::unique_ptr<Batch> current, ready;
+    std::vector<std::unique_ptr<Batch>> recycled;
+    // Main-thread-owned batches awaiting successful conversion, including a
+    // partially delivered head. Their total size is bounded by the requested
+    // chunk plus a batch when different n values require slicing or combining.
+    std::deque<std::unique_ptr<Batch>> pending;
+    int pending_offset = 0;
+    int batch_rows = 0;
+    uint64_t minimum_row_bytes = 8; // Row-end index, in addition to cell estimates.
+    double missing_values[256];
     std::exception_ptr failure, worker_exception;
     std::string detail;
     unistd_io_ctx_t file;
@@ -131,8 +223,7 @@ private:
         while (!predicate()) {
             cv.wait_for(lock, std::chrono::milliseconds(50));
             lock.unlock();
-            try { Rcpp::checkUserInterrupt(); }
-            catch (...) { close(); throw; }
+            check_interrupt();
             lock.lock();
         }
     }
@@ -151,6 +242,20 @@ private:
     bool await_request(std::unique_lock<std::mutex>& lock) {
         cv.wait(lock, [this] { return requested || cancelled.load(); });
         return !cancelled.load();
+    }
+
+    void prepare_batch(std::unique_lock<std::mutex>& lock) {
+        batch_rows = requested_rows;
+        if (!recycled.empty()) {
+            current = std::move(recycled.back());
+            recycled.pop_back();
+        }
+        lock.unlock();
+        if (!current) current.reset(new Batch(columns.size()));
+        uint64_t remaining = static_cast<uint64_t>(total_rows) - decoded.load();
+        size_t capacity = static_cast<size_t>(std::min<uint64_t>(remaining,
+            std::min<uint64_t>(batch_rows, std::max<uint64_t>(1, byte_target / minimum_row_bytes))));
+        current->reset(columns, capacity);
     }
 
     int finish_schema() {
@@ -173,24 +278,23 @@ private:
         for (size_t i = 0; i < columns.size(); ++i) {
             source_to_output[columns[i].source_index] = static_cast<int>(i);
             last_selected = std::max(last_selected, columns[i].source_index);
+            minimum_row_bytes += columns[i].string ? sizeof(std::string) + 1 + 72 : 9;
         }
         std::unique_lock<std::mutex> lock(mutex);
         schema_ready = true;
         cv.notify_all();
         if (!await_request(lock)) return READSTAT_HANDLER_ABORT;
-        lock.unlock();
-        current.reset(new Batch(columns.size()));
+        prepare_batch(lock);
         return READSTAT_HANDLER_OK;
     }
 
     int publish_and_wait() {
         std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [this] { return !ready || cancelled.load(); });
+        if (cancelled.load()) return READSTAT_HANDLER_ABORT;
         ready = std::move(current);
-        requested = false;
         cv.notify_all();
-        if (!await_request(lock)) return READSTAT_HANDLER_ABORT;
-        lock.unlock();
-        current.reset(new Batch(columns.size()));
+        prepare_batch(lock);
         return READSTAT_HANDLER_OK;
     }
 
@@ -241,21 +345,26 @@ private:
             Values& values = self->current->columns[out];
             if (self->columns[out].string) {
                 const char* text = readstat_string_value(value);
-                values.strings.emplace_back(text ? text : "");
-                self->current->bytes += sizeof(std::string) + values.strings.back().size() + 1 + 72;
+                if (!text) text = "";
+                size_t length = std::strlen(text);
+                values.text.insert(values.text.end(), text, text + length + 1);
+                values.offsets.push_back(values.text.size());
+                // Keep the existing decoded-size estimate and chunk boundaries.
+                self->current->bytes += sizeof(std::string) + length + 1 + 72;
             } else {
-                values.numbers.push_back(readstat_double_value(value));
-                unsigned char missing = 0;
+                double number;
                 if (readstat_value_is_tagged_missing(value))
-                    missing = static_cast<unsigned char>(readstat_value_tag(value));
-                else if (readstat_value_is_system_missing(value)) missing = 1;
-                values.missing.push_back(missing);
+                    number = self->missing_values[static_cast<unsigned char>(readstat_value_tag(value))];
+                else if (readstat_value_is_system_missing(value)) number = self->missing_values[1];
+                else number = readstat_double_value(value);
+                values.numbers.push_back(number);
                 self->current->bytes += sizeof(double) + sizeof(unsigned char);
             }
             if (index == self->last_selected) {
                 ++self->current->rows;
+                self->current->row_ends.push_back(self->current->bytes);
                 ++self->decoded;
-                if (self->current->rows >= self->requested_rows ||
+                if (self->current->rows >= self->batch_rows ||
                         self->current->bytes >= self->byte_target)
                     return self->publish_and_wait();
             }
@@ -334,10 +443,12 @@ private:
             }
         } catch (...) { error = std::current_exception(); }
         close_cb(this); // Also covers unexpected native exceptions.
-        std::lock_guard<std::mutex> lock(mutex);
+        std::unique_lock<std::mutex> lock(mutex);
         // A failing parse never publishes a potentially incomplete current batch.
-        if (!error && !cancelled.load() && current && current->rows > 0)
-            ready = std::move(current);
+        if (!error && !cancelled.load() && current && current->rows > 0) {
+            cv.wait(lock, [this] { return !ready || cancelled.load(); });
+            if (!cancelled.load()) ready = std::move(current);
+        }
         current.reset();
         failure = error;
         done = true;
@@ -383,28 +494,42 @@ SEXP native_open(std::string path, std::vector<std::string> columns, std::string
 SEXP native_next(SEXP ptr, int n) {
     if (n < 1) Rcpp::stop("Chunk row limit must be positive.");
     Reader& reader = get_reader(ptr);
-    Batch* batch = reader.next(n);
-    if (!batch) return R_NilValue;
+    Delivery delivery = reader.next(n);
+    if (delivery.rows == 0) return R_NilValue;
     Rcpp::List result(reader.columns.size());
     Rcpp::CharacterVector names(reader.columns.size());
     for (size_t i = 0; i < reader.columns.size(); ++i) {
-        Rcpp::checkUserInterrupt();
+        reader.check_interrupt();
         const Column& col = reader.columns[i];
-        const Values& values = batch->columns[i];
         names[i] = utf8(col.name);
         Rcpp::RObject output;
         if (col.string) {
-            Rcpp::CharacterVector x(batch->rows);
-            for (int j = 0; j < batch->rows; ++j) {
-                if (j % 16384 == 0) Rcpp::checkUserInterrupt();
-                x[j] = utf8(values.strings[j]);
+            Rcpp::CharacterVector x(Rcpp::no_init(delivery.rows));
+            int dest = 0;
+            for (const auto& slice : delivery.slices) {
+                const Values& values = slice.batch->columns[i];
+                for (int j = slice.begin; j < slice.end; ++j, ++dest) {
+                    if (dest % 16384 == 0) reader.check_interrupt();
+                    size_t begin = values.offsets[j];
+                    size_t length = values.offsets[j + 1] - begin - 1;
+                    if (length > INT_MAX) Rcpp::stop("SAS string exceeds R's string length limit.");
+                    SET_STRING_ELT(x, dest, Rf_mkCharLenCE(values.text.data() + begin,
+                        static_cast<int>(length), CE_UTF8));
+                }
             }
             output = x;
         } else {
-            Rcpp::NumericVector x(batch->rows);
-            for (int j = 0; j < batch->rows; ++j) {
-                if (j % 16384 == 0) Rcpp::checkUserInterrupt();
-                x[j] = values.missing[j] ? missing_value(values.missing[j]) : values.numbers[j];
+            Rcpp::NumericVector x(Rcpp::no_init(delivery.rows));
+            int dest = 0;
+            for (const auto& slice : delivery.slices) {
+                const auto& numbers = slice.batch->columns[i].numbers;
+                for (int j = slice.begin; j < slice.end;) {
+                    reader.check_interrupt();
+                    int count = std::min(16384, slice.end - j);
+                    std::memcpy(REAL(x) + dest, numbers.data() + j, count * sizeof(double));
+                    dest += count;
+                    j += count;
+                }
             }
             output = x;
         }
@@ -414,9 +539,9 @@ SEXP native_next(SEXP ptr, int n) {
     }
     result.attr("names") = names;
     result.attr("class") = "data.frame";
-    result.attr("row.names") = Rcpp::IntegerVector::create(NA_INTEGER, -batch->rows);
+    result.attr("row.names") = Rcpp::IntegerVector::create(NA_INTEGER, -delivery.rows);
     if (!reader.file_label.empty()) result.attr("label") = utf8(reader.file_label);
-    reader.consume();
+    reader.consume(delivery.rows);
     return result;
 }
 
