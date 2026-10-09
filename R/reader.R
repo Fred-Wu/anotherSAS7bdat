@@ -10,9 +10,10 @@
 #' @param chunk_rows A positive whole number specifying the maximum rows per chunk.
 #'   Fewer rows are returned when the `chunk_bytes` target is reached first or
 #'   when fewer rows remain in the file.
-#' @param chunk_bytes Approximate decoded size target for each chunk, as a
-#'   numeric byte count or a size string with units B, KB, MB, GB, KiB, MiB,
-#'   or GiB (case-insensitive).
+#' @param chunk_bytes Optional approximate decoded size limit for each chunk,
+#'   as a numeric byte count or a size string with units B, KB, MB, GB, KiB,
+#'   MiB, or GiB (case-insensitive). The default, `NULL`, sizes native buffers
+#'   automatically from decoded rows and uses `chunk_rows` to end each chunk.
 #' @param columns A character vector of column names, or `NULL` for all columns.
 #' @param encoding A character string specifying the source encoding, or `NULL`
 #'   to use the encoding recorded in the file.
@@ -39,7 +40,11 @@
 #'   (`open`, `eof`, `error`, or `closed`). `eof` means end of file. Additional
 #'   diagnostic counters are `rows_decoded`, `file_opens`, `file_closes`,
 #'   `bytes_read`, and `seeks`. Byte and seek counters include metadata setup;
-#'   they do not measure R memory use.
+#'   they do not measure R memory use. With read-ahead, `rows_decoded` can be
+#'   greater than `rows_delivered`.
+#'   `estimation_rows` counts the initial rows used for buffer sizing (up to
+#'   256); `estimated_row_bytes` is the approximate decoded bytes per row,
+#'   updated after each batch. Both are zero before sampling begins.
 #' * `sas7bdat_close()` returns `NULL`, invisibly.
 #'
 #' @section Closing and stopping:
@@ -85,27 +90,61 @@
 #'   detected automatically. The file must be seekable; ZIP/gzip wrappers are
 #'   unsupported.
 #'
+#'   After the first chunk request, a native worker decodes ahead while R
+#'   converts or processes earlier chunks. Read-ahead is bounded to one queued
+#'   batch and one in-progress batch, each limited by the optional `chunk_bytes`
+#'   and the row count requested when that batch starts. Changing `n` takes effect on output
+#'   chunks even when data has already been decoded. Closing cancels the worker
+#'   and discards unread data. Returned data frames own their values and remain
+#'   valid when native buffers are reused.
+#'
 #'   Column names are case-sensitive and must be unique. Output columns follow
 #'   the requested order. Returned text is converted to UTF-8.
 #'
 #'   `chunk_rows` sets an upper limit on rows per chunk. Each chunk ends after
 #'   a complete row when either the row limit or the approximate decoded size
-#'   target, `chunk_bytes`, is reached. If the byte target is reached first,
+#'   limit, `chunk_bytes`, is reached, when supplied. If the byte limit is
+#'   reached first,
 #'   the chunk contains fewer than `chunk_rows` rows, even before the end of
 #'   the file. Row counts can vary between chunks as decoded row sizes vary.
 #'   For `sas7bdat_read_chunk()`, supplying `n` overrides the row limit for that
 #'   call; the byte target remains in effect. The final chunk may also contain
 #'   fewer rows if fewer remain in the file.
 #'
+#'   With `chunk_bytes = NULL`, the requested row count controls chunk sizes.
+#'   The reader starts with small native buffers and samples the first 256
+#'   decoded rows, across chunks if needed. Those rows remain in the normal
+#'   output stream. The sample estimates text sizes for reserving buffers for
+#'   the rest of the chunk, with 25 percent text headroom. Estimates are then
+#'   updated once per batch as text sizes change. Buffers grow if needed and
+#'   are reused across chunks. Files with fewer than 256 rows use the rows
+#'   available. Sampling does not reopen the file or make an extra parser pass.
+#'
+#'   Automatic sizing controls buffer allocation; it does not impose a byte
+#'   limit. Choose a row count that fits available memory, or supply
+#'   `chunk_bytes` as an additional limit. An explicit byte limit is never
+#'   increased by the estimator.
+#'
 #'   The byte target is approximate and may be exceeded by the last row added
 #'   to a chunk. It is not a limit on total R memory usage; even a single row
 #'   may exceed the target.
+#'   Native buffers for read-ahead and the output chunk can coexist, as can
+#'   earlier data frames retained by your callback. Reusable native buffers
+#'   retain their allocated capacity until the reader is closed.
 #'   MB and GB use powers of 1,000; MiB and GiB use powers of 1,024.
 #'
 #'   SAS numerics are doubles. Special missing values use haven-compatible tagged
 #'   NAs; character padding is trimmed by ReadStat. Column labels and SAS formats
-#'   are retained as `label` and `format.sas` attributes. User-defined formats
-#'   and SAS catalog files are not interpreted. Files exceeding 2,147,483,647
+#'   are retained as `label` and `format.sas` attributes.
+#'
+#'   Date/time formats are identified once when the reader opens. With
+#'   `dates = TRUE`, conversion occurs while constructing each output column:
+#'   dates use R's epoch, datetimes use UTC, and times retain seconds as `hms`.
+#'   Missing values and their tags are preserved. With `dates = FALSE`, numeric
+#'   values remain in their original SAS units.
+#'
+#'   User-defined formats and SAS catalog files are not interpreted.
+#'   Files exceeding 2,147,483,647
 #'   physical observations are rejected in this version, before counter overflow.
 #'
 #'   To retain the entire dataset, you must explicitly save the chunks and
@@ -166,7 +205,7 @@
 #' rm(chunks)
 #' sas7bdat_info(reader)$status  # "closed"
 sas7bdat_read <- function(path, callback, chunk_rows = 100000L,
-                         chunk_bytes = "128 MiB", columns = NULL,
+                         chunk_bytes = NULL, columns = NULL,
                          encoding = NULL, dates = TRUE) {
   if (missing(callback)) {
     stop(paste0("Supply `callback`: a function to run on each chunk, for example ",
@@ -198,7 +237,7 @@ sas7bdat_read <- function(path, callback, chunk_rows = 100000L,
 #' @rdname sas7bdat_read
 #' @export
 sas7bdat_open <- function(path, chunk_rows = 100000L,
-                         chunk_bytes = "128 MiB", columns = NULL,
+                         chunk_bytes = NULL, columns = NULL,
                          encoding = NULL, dates = TRUE) {
   scalar_string(path, "path")
   if (!file.exists(path) || isTRUE(file.info(path)$isdir)) {
@@ -208,7 +247,7 @@ sas7bdat_open <- function(path, chunk_rows = 100000L,
     stop("External compression is unsupported; supply the .sas7bdat file.", call. = FALSE)
   }
   chunk_rows <- row_limit(chunk_rows, "chunk_rows")
-  chunk_bytes <- byte_limit(chunk_bytes)
+  chunk_bytes <- if (is.null(chunk_bytes)) 0 else byte_limit(chunk_bytes)
   if (!is.null(columns) && (!is.character(columns) || !length(columns) ||
       anyNA(columns) || any(!nzchar(columns)) || anyDuplicated(columns))) {
     stop("`columns` must be NULL or unique, nonempty column names.", call. = FALSE)
@@ -219,7 +258,8 @@ sas7bdat_open <- function(path, chunk_rows = 100000L,
   }
   path <- enc2utf8(normalizePath(path, winslash = "/", mustWork = TRUE))
   ptr <- native_open(path, if (is.null(columns)) character() else enc2utf8(columns),
-                     if (is.null(encoding)) "" else encoding, floor(chunk_bytes))
+                     if (is.null(encoding)) "" else encoding, floor(chunk_bytes),
+                     sas_date_kind)
   structure(list(ptr = ptr, chunk_rows = chunk_rows, dates = dates),
             class = "sas7bdat_reader")
 }
@@ -230,33 +270,7 @@ sas7bdat_read_chunk <- function(reader, n = NULL) {
   check_reader(reader)
   if (is.null(n)) n <- reader$chunk_rows
   n <- row_limit(n, "n")
-  chunk <- native_next(reader$ptr, n)
-  if (is.null(chunk) || !reader$dates) return(chunk)
-  for (j in seq_along(chunk)) {
-    x <- chunk[[j]]
-    fmt <- attr(x, "format.sas", exact = TRUE)
-    if (!is.double(x) || is.null(fmt)) next
-    kind <- sas_date_kind(fmt)
-    if (kind == "numeric") next
-    # Avoid arithmetic on tagged NAs, retaining their payloads exactly.
-    if (kind != "time") {
-      valid <- !is.na(x)
-      x[valid] <- x[valid] - if (kind == "date") 3653 else 3653 * 86400
-    }
-    if (kind == "date") class(x) <- "Date"
-    if (kind == "datetime") {
-      class(x) <- c("POSIXct", "POSIXt")
-      attr(x, "tzone") <- "UTC"
-    }
-    if (kind == "time") {
-      # Construct from bare doubles, then restore the SAS column metadata.
-      x <- hms::new_hms(as.numeric(x))
-      attr(x, "format.sas") <- fmt
-      attr(x, "label") <- attr(chunk[[j]], "label", exact = TRUE)
-    }
-    chunk[[j]] <- x
-  }
-  chunk
+  native_next(reader$ptr, n, reader$dates)
 }
 
 #' @rdname sas7bdat_read

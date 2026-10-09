@@ -11,8 +11,8 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
 // native_open
-SEXP native_open(std::string path, std::vector<std::string> columns, std::string encoding, double bytes);
-RcppExport SEXP _anotherSAS7bdat_native_open(SEXP pathSEXP, SEXP columnsSEXP, SEXP encodingSEXP, SEXP bytesSEXP) {
+SEXP native_open(std::string path, std::vector<std::string> columns, std::string encoding, double bytes, Rcpp::Function date_kind);
+RcppExport SEXP _anotherSAS7bdat_native_open(SEXP pathSEXP, SEXP columnsSEXP, SEXP encodingSEXP, SEXP bytesSEXP, SEXP date_kindSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -20,19 +20,48 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< std::vector<std::string> >::type columns(columnsSEXP);
     Rcpp::traits::input_parameter< std::string >::type encoding(encodingSEXP);
     Rcpp::traits::input_parameter< double >::type bytes(bytesSEXP);
-    rcpp_result_gen = Rcpp::wrap(native_open(path, columns, encoding, bytes));
+    Rcpp::traits::input_parameter< Rcpp::Function >::type date_kind(date_kindSEXP);
+    rcpp_result_gen = Rcpp::wrap(native_open(path, columns, encoding, bytes, date_kind));
     return rcpp_result_gen;
 END_RCPP
 }
 // native_next
-SEXP native_next(SEXP ptr, int n);
-RcppExport SEXP _anotherSAS7bdat_native_next(SEXP ptrSEXP, SEXP nSEXP) {
+SEXP native_next(SEXP ptr, int n, bool dates);
+RcppExport SEXP _anotherSAS7bdat_native_next(SEXP ptrSEXP, SEXP nSEXP, SEXP datesSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
     Rcpp::traits::input_parameter< int >::type n(nSEXP);
-    rcpp_result_gen = Rcpp::wrap(native_next(ptr, n));
+    Rcpp::traits::input_parameter< bool >::type dates(datesSEXP);
+    rcpp_result_gen = Rcpp::wrap(native_next(ptr, n, dates));
+    return rcpp_result_gen;
+END_RCPP
+}
+// native_arrow_schema
+SEXP native_arrow_schema(SEXP ptr, bool dates, std::vector<std::string> tags);
+RcppExport SEXP _anotherSAS7bdat_native_arrow_schema(SEXP ptrSEXP, SEXP datesSEXP, SEXP tagsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
+    Rcpp::traits::input_parameter< bool >::type dates(datesSEXP);
+    Rcpp::traits::input_parameter< std::vector<std::string> >::type tags(tagsSEXP);
+    rcpp_result_gen = Rcpp::wrap(native_arrow_schema(ptr, dates, tags));
+    return rcpp_result_gen;
+END_RCPP
+}
+// native_arrow_next
+SEXP native_arrow_next(SEXP ptr, int n, bool dates, std::vector<std::string> tags);
+RcppExport SEXP _anotherSAS7bdat_native_arrow_next(SEXP ptrSEXP, SEXP nSEXP, SEXP datesSEXP, SEXP tagsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
+    Rcpp::traits::input_parameter< int >::type n(nSEXP);
+    Rcpp::traits::input_parameter< bool >::type dates(datesSEXP);
+    Rcpp::traits::input_parameter< std::vector<std::string> >::type tags(tagsSEXP);
+    rcpp_result_gen = Rcpp::wrap(native_arrow_next(ptr, n, dates, tags));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -59,8 +88,10 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_anotherSAS7bdat_native_open", (DL_FUNC) &_anotherSAS7bdat_native_open, 4},
-    {"_anotherSAS7bdat_native_next", (DL_FUNC) &_anotherSAS7bdat_native_next, 2},
+    {"_anotherSAS7bdat_native_open", (DL_FUNC) &_anotherSAS7bdat_native_open, 5},
+    {"_anotherSAS7bdat_native_next", (DL_FUNC) &_anotherSAS7bdat_native_next, 3},
+    {"_anotherSAS7bdat_native_arrow_schema", (DL_FUNC) &_anotherSAS7bdat_native_arrow_schema, 3},
+    {"_anotherSAS7bdat_native_arrow_next", (DL_FUNC) &_anotherSAS7bdat_native_arrow_next, 4},
     {"_anotherSAS7bdat_native_close", (DL_FUNC) &_anotherSAS7bdat_native_close, 1},
     {"_anotherSAS7bdat_native_info", (DL_FUNC) &_anotherSAS7bdat_native_info, 1},
     {NULL, NULL, 0}

@@ -12,7 +12,7 @@ sas7bdat_read(
   path,
   callback,
   chunk_rows = 100000L,
-  chunk_bytes = "128 MiB",
+  chunk_bytes = NULL,
   columns = NULL,
   encoding = NULL,
   dates = TRUE
@@ -21,7 +21,7 @@ sas7bdat_read(
 sas7bdat_open(
   path,
   chunk_rows = 100000L,
-  chunk_bytes = "128 MiB",
+  chunk_bytes = NULL,
   columns = NULL,
   encoding = NULL,
   dates = TRUE
@@ -42,9 +42,10 @@ sas7bdat_info(reader)
 Fewer rows are returned when the \code{chunk_bytes} target is reached first or
 when fewer rows remain in the file.}
 
-\item{chunk_bytes}{Approximate decoded size target for each chunk, as a
-numeric byte count or a size string with units B, KB, MB, GB, KiB, MiB,
-or GiB (case-insensitive).}
+\item{chunk_bytes}{Optional approximate decoded size limit for each chunk,
+as a numeric byte count or a size string with units B, KB, MB, GB, KiB,
+MiB, or GiB (case-insensitive). The default, \code{NULL}, sizes native buffers
+automatically from decoded rows and uses \code{chunk_rows} to end each chunk.}
 
 \item{columns}{A character vector of column names, or \code{NULL} for all columns.}
 
@@ -78,7 +79,11 @@ position in the open file.
 (\code{open}, \code{eof}, \code{error}, or \code{closed}). \code{eof} means end of file. Additional
 diagnostic counters are \code{rows_decoded}, \code{file_opens}, \code{file_closes},
 \code{bytes_read}, and \code{seeks}. Byte and seek counters include metadata setup;
-they do not measure R memory use.
+they do not measure R memory use. With read-ahead, \code{rows_decoded} can be
+greater than \code{rows_delivered}.
+\code{estimation_rows} counts the initial rows used for buffer sizing (up to
+256); \code{estimated_row_bytes} is the approximate decoded bytes per row,
+updated after each batch. Both are zero before sampling begins.
 \item \code{sas7bdat_close()} returns \code{NULL}, invisibly.
 }
 }
@@ -123,27 +128,61 @@ the file once at initialization. Internal SAS RLE and RDC compression are
 detected automatically. The file must be seekable; ZIP/gzip wrappers are
 unsupported.
 
+After the first chunk request, a native worker decodes ahead while R
+converts or processes earlier chunks. Read-ahead is bounded to one queued
+batch and one in-progress batch, each limited by the optional \code{chunk_bytes}
+and the row count requested when that batch starts. Changing \code{n} takes effect on output
+chunks even when data has already been decoded. Closing cancels the worker
+and discards unread data. Returned data frames own their values and remain
+valid when native buffers are reused.
+
 Column names are case-sensitive and must be unique. Output columns follow
 the requested order. Returned text is converted to UTF-8.
 
 \code{chunk_rows} sets an upper limit on rows per chunk. Each chunk ends after
 a complete row when either the row limit or the approximate decoded size
-target, \code{chunk_bytes}, is reached. If the byte target is reached first,
+limit, \code{chunk_bytes}, is reached, when supplied. If the byte limit is
+reached first,
 the chunk contains fewer than \code{chunk_rows} rows, even before the end of
 the file. Row counts can vary between chunks as decoded row sizes vary.
 For \code{sas7bdat_read_chunk()}, supplying \code{n} overrides the row limit for that
 call; the byte target remains in effect. The final chunk may also contain
 fewer rows if fewer remain in the file.
 
+With \code{chunk_bytes = NULL}, the requested row count controls chunk sizes.
+The reader starts with small native buffers and samples the first 256
+decoded rows, across chunks if needed. Those rows remain in the normal
+output stream. The sample estimates text sizes for reserving buffers for
+the rest of the chunk, with 25 percent text headroom. Estimates are then
+updated once per batch as text sizes change. Buffers grow if needed and
+are reused across chunks. Files with fewer than 256 rows use the rows
+available. Sampling does not reopen the file or make an extra parser pass.
+
+Automatic sizing controls buffer allocation; it does not impose a byte
+limit. Choose a row count that fits available memory, or supply
+\code{chunk_bytes} as an additional limit. An explicit byte limit is never
+increased by the estimator.
+
 The byte target is approximate and may be exceeded by the last row added
 to a chunk. It is not a limit on total R memory usage; even a single row
 may exceed the target.
+Native buffers for read-ahead and the output chunk can coexist, as can
+earlier data frames retained by your callback. Reusable native buffers
+retain their allocated capacity until the reader is closed.
 MB and GB use powers of 1,000; MiB and GiB use powers of 1,024.
 
 SAS numerics are doubles. Special missing values use haven-compatible tagged
 NAs; character padding is trimmed by ReadStat. Column labels and SAS formats
-are retained as \code{label} and \code{format.sas} attributes. User-defined formats
-and SAS catalog files are not interpreted. Files exceeding 2,147,483,647
+are retained as \code{label} and \code{format.sas} attributes.
+
+Date/time formats are identified once when the reader opens. With
+\code{dates = TRUE}, conversion occurs while constructing each output column:
+dates use R's epoch, datetimes use UTC, and times retain seconds as \code{hms}.
+Missing values and their tags are preserved. With \code{dates = FALSE}, numeric
+values remain in their original SAS units.
+
+User-defined formats and SAS catalog files are not interpreted.
+Files exceeding 2,147,483,647
 physical observations are rejected in this version, before counter overflow.
 
 To retain the entire dataset, you must explicitly save the chunks and

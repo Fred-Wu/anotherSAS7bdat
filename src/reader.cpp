@@ -1,9 +1,12 @@
 #include <Rcpp.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cctype>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -11,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "arrow-export.h"
 
 extern "C" {
 #include "readstat/readstat.h"
@@ -20,30 +24,79 @@ extern "C" {
 namespace {
 
 std::string text_or_empty(const char* value) { return value ? value : ""; }
+double missing_value(unsigned char code);
+
+enum class DateKind { Numeric, Date, Datetime, Time };
 
 struct Column {
     std::string name, label, format;
     bool string;
     size_t width;
     int source_index;
+    DateKind date_kind = DateKind::Numeric;
 };
 
 struct Values {
     std::vector<double> numbers;
-    std::vector<unsigned char> missing;
-    std::vector<std::string> strings;
+    // One arena per character column, with NUL-terminated cells and offsets.
+    std::vector<char> text;
+    std::vector<size_t> offsets;
 };
 
 struct Batch {
     std::vector<Values> columns;
     int rows = 0;
     uint64_t bytes = 0;
+    std::vector<uint64_t> row_ends;
     explicit Batch(size_t n) : columns(n) {}
+
+    void reset(const std::vector<Column>& schema) {
+        rows = 0;
+        bytes = 0;
+        row_ends.clear();
+        for (size_t i = 0; i < schema.size(); ++i) {
+            auto& values = columns[i];
+            if (schema[i].string) {
+                values.text.clear();
+                values.offsets.clear();
+                values.offsets.push_back(0);
+            } else {
+                values.numbers.clear();
+            }
+        }
+    }
+
+    void reserve(const std::vector<Column>& schema, size_t capacity,
+                 const std::vector<double>& text_per_row, bool sampled) {
+        row_ends.reserve(capacity);
+        for (size_t i = 0; i < schema.size(); ++i) {
+            auto& values = columns[i];
+            if (schema[i].string) {
+                values.offsets.reserve(capacity + 1);
+                double width = sampled ? text_per_row[i] * 1.25 :
+                    std::min<size_t>(schema[i].width + 1, 64);
+                values.text.reserve(static_cast<size_t>(std::ceil(capacity * width)));
+            } else {
+                values.numbers.reserve(capacity);
+            }
+        }
+    }
+};
+
+struct Slice {
+    const Batch* batch;
+    int begin, end;
+};
+
+struct Delivery {
+    std::vector<Slice> slices;
+    int rows = 0;
 };
 
 // Only the main thread creates/accesses R objects. The worker owns ReadStat,
-// its file descriptor, and the in-progress batch. There is no read-ahead queue:
-// the worker waits at every batch boundary for the next explicit request.
+// its file descriptor, and the in-progress batch. One queued batch plus one
+// in-progress batch can run ahead of R. Delivered buffers return to a small
+// reuse pool only after conversion finishes; returned R objects own their data.
 class Reader {
 public:
     const std::string path, encoding;
@@ -54,16 +107,28 @@ public:
     int64_t total_rows = 0;
     uint64_t delivered = 0;
     std::atomic<uint64_t> opens{0}, closes{0}, bytes_read{0}, seeks{0}, decoded{0};
+    std::atomic<uint64_t> estimation_rows{0};
+    std::atomic<double> estimated_row_bytes{0};
     std::atomic<bool> cancelled{false};
     bool closed = false; // Main thread only.
 
     Reader(std::string p, std::vector<std::string> names, std::string enc, double bytes)
         : path(std::move(p)), encoding(std::move(enc)), selected_names(std::move(names)),
-          byte_target(static_cast<uint64_t>(bytes)) { file.fd = -1; }
+          byte_target(static_cast<uint64_t>(bytes)) {
+        file.fd = -1;
+        recycled.reserve(2);
+        // Read R's NA payload only on the main thread, before starting ReadStat.
+        for (int i = 0; i < 256; ++i) missing_values[i] = missing_value(i);
+    }
 
     ~Reader() { close(); }
 
     void start() { worker = std::thread(&Reader::run, this); }
+
+    void check_interrupt() {
+        try { Rcpp::checkUserInterrupt(); }
+        catch (...) { close(); throw; }
+    }
 
     void await_schema() {
         std::unique_lock<std::mutex> lock(mutex);
@@ -72,25 +137,61 @@ public:
         if (!schema_ready) throw std::runtime_error("SAS metadata was not available.");
     }
 
-    Batch* next(int n) {
+    Delivery next(int n) {
         std::unique_lock<std::mutex> lock(mutex);
         if (closed) throw std::runtime_error("The SAS reader is closed.");
-        if (ready) return ready.get();
-        if (!done) {
-            requested_rows = n;
-            requested = true;
-            cv.notify_all();
-            wait_main(lock, [this] { return ready || done; });
+        requested_rows = n;
+        requested = true;
+        cv.notify_all();
+        Delivery result;
+        uint64_t bytes = 0;
+        size_t index = 0;
+        int begin = pending_offset;
+        while (result.rows < n && (!byte_target || bytes < byte_target)) {
+            if (index == pending.size()) {
+                wait_main(lock, [this] { return ready || done; });
+                if (!ready) {
+                    // Completed batches remain readable before a later error.
+                    if (failure && result.rows == 0) std::rethrow_exception(failure);
+                    break;
+                }
+                pending.push_back(std::move(ready));
+                cv.notify_all();
+            }
+            const Batch& batch = *pending[index];
+            int end = begin + std::min(batch.rows - begin, n - result.rows);
+            uint64_t base = begin == 0 ? 0 : batch.row_ends[begin - 1];
+            // Split or combine prefetched batches when n changes. The byte
+            // target still ends at the first complete row that reaches it.
+            if (byte_target) {
+                auto stop = std::lower_bound(batch.row_ends.begin() + begin,
+                    batch.row_ends.begin() + end, base + byte_target - bytes);
+                if (stop != batch.row_ends.begin() + end)
+                    end = static_cast<int>(stop - batch.row_ends.begin()) + 1;
+            }
+            result.slices.push_back({&batch, begin, end});
+            result.rows += end - begin;
+            bytes += batch.row_ends[end - 1] - base;
+            ++index;
+            begin = 0;
         }
-        if (ready) return ready.get();
-        if (failure) std::rethrow_exception(failure);
-        return nullptr;
+        return result;
     }
 
-    void consume() {
+    void consume(int rows) {
         std::lock_guard<std::mutex> lock(mutex);
-        delivered += ready->rows;
-        ready.reset();
+        delivered += rows;
+        while (rows > 0) {
+            int count = std::min(rows, pending.front()->rows - pending_offset);
+            pending_offset += count;
+            rows -= count;
+            if (pending_offset == pending.front()->rows) {
+                if (recycled.size() < 2) recycled.push_back(std::move(pending.front()));
+                pending.pop_front();
+                pending_offset = 0;
+            }
+        }
+        cv.notify_all();
     }
 
     void close() noexcept {
@@ -101,6 +202,8 @@ public:
         cv.notify_all();
         if (worker.joinable()) worker.join();
         ready.reset();
+        pending.clear();
+        recycled.clear();
         current.reset();
         closed = true;
     }
@@ -109,7 +212,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         if (closed) return "closed";
         if (failure) return "error";
-        return done && !ready ? "eof" : "open";
+        return done && !ready && pending.empty() ? "eof" : "open";
     }
 
 private:
@@ -122,6 +225,19 @@ private:
     std::vector<Column> source_columns;
     std::vector<int> source_to_output;
     std::unique_ptr<Batch> current, ready;
+    std::vector<std::unique_ptr<Batch>> recycled;
+    // Main-thread-owned batches awaiting successful conversion, including a
+    // partially delivered head. Their total size is bounded by the requested
+    // chunk plus a batch when different n values require slicing or combining.
+    std::deque<std::unique_ptr<Batch>> pending;
+    int pending_offset = 0;
+    int batch_rows = 0;
+    uint64_t minimum_row_bytes = 8; // Row-end index, in addition to cell estimates.
+    static constexpr int sample_limit = 256;
+    int sample_rows = 0, batch_sample_rows = 0;
+    std::vector<uint64_t> sample_text_bytes;
+    std::vector<double> text_per_row;
+    double missing_values[256];
     std::exception_ptr failure, worker_exception;
     std::string detail;
     unistd_io_ctx_t file;
@@ -131,8 +247,7 @@ private:
         while (!predicate()) {
             cv.wait_for(lock, std::chrono::milliseconds(50));
             lock.unlock();
-            try { Rcpp::checkUserInterrupt(); }
-            catch (...) { close(); throw; }
+            check_interrupt();
             lock.lock();
         }
     }
@@ -151,6 +266,69 @@ private:
     bool await_request(std::unique_lock<std::mutex>& lock) {
         cv.wait(lock, [this] { return requested || cancelled.load(); });
         return !cancelled.load();
+    }
+
+    void refresh_estimate() {
+        double bytes = static_cast<double>(minimum_row_bytes - 8);
+        for (size_t i = 0; i < columns.size(); ++i)
+            if (columns[i].string) bytes += text_per_row[i] - 1;
+        estimated_row_bytes.store(bytes);
+        estimation_rows.store(sample_rows);
+    }
+
+    void sample_current(int rows) {
+        int added = rows - batch_sample_rows;
+        if (!added) return;
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (columns[i].string) {
+                const auto& offsets = current->columns[i].offsets;
+                sample_text_bytes[i] += offsets[rows] - offsets[batch_sample_rows];
+                text_per_row[i] = static_cast<double>(sample_text_bytes[i]) / (sample_rows + added);
+            }
+        }
+        sample_rows += added;
+        batch_sample_rows = rows;
+        refresh_estimate();
+    }
+
+    void finish_batch() {
+        if (sample_rows < sample_limit) {
+            sample_current(std::min(current->rows, batch_sample_rows + sample_limit - sample_rows));
+        } else {
+            // Update once per batch, using arena lengths already collected.
+            // Blend the latest batch with the previous estimate to reduce churn.
+            for (size_t i = 0; i < columns.size(); ++i)
+                if (columns[i].string)
+                    text_per_row[i] = (text_per_row[i] +
+                        static_cast<double>(current->columns[i].text.size()) / current->rows) / 2;
+            refresh_estimate();
+        }
+    }
+
+    void reserve_current() {
+        uint64_t remaining = static_cast<uint64_t>(total_rows) - decoded.load() + current->rows;
+        size_t capacity = static_cast<size_t>(std::min<uint64_t>(remaining, batch_rows));
+        bool sampled = sample_rows == sample_limit;
+        if (!sampled) capacity = std::min<size_t>(capacity, sample_limit - sample_rows);
+        if (byte_target) {
+            double row_bytes = sampled ? estimated_row_bytes.load() : minimum_row_bytes;
+            double fit = std::ceil(byte_target / std::max(1.0, row_bytes) * (sampled ? 1.25 : 1));
+            capacity = static_cast<size_t>(std::min<double>(capacity, fit));
+        }
+        current->reserve(columns, capacity, text_per_row, sampled);
+    }
+
+    void prepare_batch(std::unique_lock<std::mutex>& lock) {
+        batch_rows = requested_rows;
+        if (!recycled.empty()) {
+            current = std::move(recycled.back());
+            recycled.pop_back();
+        }
+        lock.unlock();
+        if (!current) current.reset(new Batch(columns.size()));
+        current->reset(columns);
+        batch_sample_rows = 0;
+        reserve_current();
     }
 
     int finish_schema() {
@@ -173,24 +351,26 @@ private:
         for (size_t i = 0; i < columns.size(); ++i) {
             source_to_output[columns[i].source_index] = static_cast<int>(i);
             last_selected = std::max(last_selected, columns[i].source_index);
+            minimum_row_bytes += columns[i].string ? sizeof(std::string) + 1 + 72 : 9;
         }
+        sample_text_bytes.assign(columns.size(), 0);
+        text_per_row.assign(columns.size(), 1); // Includes each cell's terminator.
         std::unique_lock<std::mutex> lock(mutex);
         schema_ready = true;
         cv.notify_all();
         if (!await_request(lock)) return READSTAT_HANDLER_ABORT;
-        lock.unlock();
-        current.reset(new Batch(columns.size()));
+        prepare_batch(lock);
         return READSTAT_HANDLER_OK;
     }
 
     int publish_and_wait() {
+        finish_batch();
         std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [this] { return !ready || cancelled.load(); });
+        if (cancelled.load()) return READSTAT_HANDLER_ABORT;
         ready = std::move(current);
-        requested = false;
         cv.notify_all();
-        if (!await_request(lock)) return READSTAT_HANDLER_ABORT;
-        lock.unlock();
-        current.reset(new Batch(columns.size()));
+        prepare_batch(lock);
         return READSTAT_HANDLER_OK;
     }
 
@@ -241,22 +421,32 @@ private:
             Values& values = self->current->columns[out];
             if (self->columns[out].string) {
                 const char* text = readstat_string_value(value);
-                values.strings.emplace_back(text ? text : "");
-                self->current->bytes += sizeof(std::string) + values.strings.back().size() + 1 + 72;
+                if (!text) text = "";
+                size_t length = std::strlen(text);
+                values.text.insert(values.text.end(), text, text + length + 1);
+                values.offsets.push_back(values.text.size());
+                // Keep the existing decoded-size estimate and chunk boundaries.
+                self->current->bytes += sizeof(std::string) + length + 1 + 72;
             } else {
-                values.numbers.push_back(readstat_double_value(value));
-                unsigned char missing = 0;
+                double number;
                 if (readstat_value_is_tagged_missing(value))
-                    missing = static_cast<unsigned char>(readstat_value_tag(value));
-                else if (readstat_value_is_system_missing(value)) missing = 1;
-                values.missing.push_back(missing);
+                    number = self->missing_values[static_cast<unsigned char>(readstat_value_tag(value))];
+                else if (readstat_value_is_system_missing(value)) number = self->missing_values[1];
+                else number = readstat_double_value(value);
+                values.numbers.push_back(number);
                 self->current->bytes += sizeof(double) + sizeof(unsigned char);
             }
             if (index == self->last_selected) {
                 ++self->current->rows;
+                self->current->row_ends.push_back(self->current->bytes);
                 ++self->decoded;
-                if (self->current->rows >= self->requested_rows ||
-                        self->current->bytes >= self->byte_target)
+                if (self->sample_rows < sample_limit && self->current->rows - self->batch_sample_rows ==
+                        sample_limit - self->sample_rows) {
+                    self->sample_current(self->current->rows);
+                    self->reserve_current();
+                }
+                if (self->current->rows >= self->batch_rows ||
+                        (self->byte_target && self->current->bytes >= self->byte_target))
                     return self->publish_and_wait();
             }
             return static_cast<int>(READSTAT_HANDLER_OK);
@@ -332,12 +522,15 @@ private:
                 if (!detail.empty()) message += ": " + detail;
                 throw std::runtime_error(message);
             }
+            if (!cancelled.load() && current && current->rows > 0) finish_batch();
         } catch (...) { error = std::current_exception(); }
         close_cb(this); // Also covers unexpected native exceptions.
-        std::lock_guard<std::mutex> lock(mutex);
+        std::unique_lock<std::mutex> lock(mutex);
         // A failing parse never publishes a potentially incomplete current batch.
-        if (!error && !cancelled.load() && current && current->rows > 0)
-            ready = std::move(current);
+        if (!error && !cancelled.load() && current && current->rows > 0) {
+            cv.wait(lock, [this] { return !ready || cancelled.load(); });
+            if (!cancelled.load()) ready = std::move(current);
+        }
         current.reset();
         failure = error;
         done = true;
@@ -367,56 +560,257 @@ double missing_value(unsigned char code) {
 
 Rcpp::String utf8(const std::string& x) { return Rcpp::String(x.c_str(), CE_UTF8); }
 
+std::string arrow_format(const Column& col, bool dates) {
+    if (col.string) return "u";
+    if (dates && col.date_kind == DateKind::Date) return "tdD";
+    if (dates && col.date_kind == DateKind::Datetime) return "tsu:UTC";
+    // Keep SAS times as double seconds: SAS allows negative times, values
+    // beyond 24 hours and fractions that a Parquet time-of-day cannot retain.
+    return "g";
+}
+
+sas_arrow::Owner<ArrowSchema> arrow_schema(Reader& reader, bool dates,
+                                          const std::vector<std::string>& tags) {
+    if (tags.size() != reader.columns.size()) Rcpp::stop("Invalid SAS tag-column mapping.");
+    auto root = sas_arrow::schema("+s", "");
+    root->flags = 0;
+    sas_arrow::metadata(*root, {{"sas.table_name", reader.table_name},
+        {"sas.label", reader.file_label}, {"sas.encoding", reader.file_encoding}});
+    auto& storage = *static_cast<sas_arrow::SchemaStorage*>(root->private_data);
+    storage.children.reserve(reader.columns.size() * 2);
+    for (size_t i = 0; i < reader.columns.size(); ++i) {
+        const auto& col = reader.columns[i];
+        auto child = sas_arrow::schema(arrow_format(col, dates), col.name);
+        std::string kind = "numeric";
+        if (col.string) kind = "character";
+        else if (col.date_kind == DateKind::Date) kind = "date";
+        else if (col.date_kind == DateKind::Datetime) kind = "datetime";
+        else if (col.date_kind == DateKind::Time) kind = "time";
+        sas_arrow::metadata(*child, {{"sas.label", col.label}, {"sas.format", col.format},
+            {"sas.type", kind}, {"sas.missing_tags", tags[i]},
+            {"sas.units", !dates || kind == "numeric" || col.string ? "original" :
+                kind == "time" ? "seconds" : kind == "date" ? "days since 1970-01-01" :
+                "microseconds since 1970-01-01 UTC"}});
+        storage.children.push_back(child.release());
+    }
+    for (size_t i = 0; i < tags.size(); ++i) {
+        if (tags[i].empty()) continue;
+        auto child = sas_arrow::schema("u", tags[i]);
+        sas_arrow::metadata(*child, {{"sas.missing_for", reader.columns[i].name}});
+        storage.children.push_back(child.release());
+    }
+    sas_arrow::finish(*root);
+    return root;
+}
+
+sas_arrow::Owner<ArrowArray> arrow_column(Reader& reader, const Delivery& delivery,
+                                         size_t index, bool dates, bool tags) {
+    auto result = sas_arrow::array(delivery.rows);
+    auto& storage = *static_cast<sas_arrow::ArrayStorage*>(result->private_data);
+    const auto& col = reader.columns[index];
+    const auto format = tags ? "u" : arrow_format(col, dates);
+    const bool text = tags || col.string;
+    if (text) {
+        storage.offsets.reserve(static_cast<size_t>(delivery.rows) + 1);
+        storage.offsets.push_back(0);
+        // Reserve once using actual decoded text lengths, excluding per-cell NULs.
+        size_t bytes = tags ? delivery.rows : 0;
+        if (!tags) {
+            for (const auto& slice : delivery.slices) {
+                const auto& values = slice.batch->columns[index];
+                bytes += values.offsets[slice.end] - values.offsets[slice.begin] -
+                    static_cast<size_t>(slice.end - slice.begin);
+            }
+        }
+        if (bytes > INT_MAX) Rcpp::stop("A Parquet text batch exceeds 2 GiB; reduce chunk_rows.");
+        storage.text.reserve(bytes);
+    } else if (format == "tdD") storage.days.resize(delivery.rows);
+    else if (format == "tsu:UTC") storage.instants.resize(delivery.rows);
+    else storage.numbers.resize(delivery.rows);
+    if (!col.string || tags) sas_arrow::validity(storage, delivery.rows);
+
+    int dest = 0;
+    for (const auto& slice : delivery.slices) {
+        const auto& values = slice.batch->columns[index];
+        for (int j = slice.begin; j < slice.end; ++j, ++dest) {
+            if (dest % 16384 == 0) reader.check_interrupt();
+            if (tags) {
+                uint64_t bits;
+                const double value = values.numbers[j];
+                std::memcpy(&bits, &value, sizeof(bits));
+                unsigned char tag = static_cast<unsigned char>(bits >> 32);
+                if (std::isnan(value) && (tag == '_' || (tag >= 'a' && tag <= 'z'))) {
+                    storage.text.push_back(static_cast<char>(tag));
+                    sas_arrow::valid(storage, dest);
+                } else ++result->null_count;
+                storage.offsets.push_back(static_cast<int32_t>(storage.text.size()));
+            } else if (col.string) {
+                const auto begin = values.offsets[j];
+                const auto end = values.offsets[j + 1] - 1;
+                storage.text.insert(storage.text.end(), values.text.data() + begin,
+                                    values.text.data() + end);
+                storage.offsets.push_back(static_cast<int32_t>(storage.text.size()));
+            } else {
+                const double value = values.numbers[j];
+                if (std::isnan(value)) { ++result->null_count; continue; }
+                sas_arrow::valid(storage, dest);
+                if (format == "tdD") {
+                    const double day = value - 3653.0;
+                    if (!std::isfinite(day) || day != std::floor(day) ||
+                        day < INT32_MIN || day > INT32_MAX)
+                        Rcpp::stop("Column '%s' contains a date that cannot be stored losslessly; use dates = FALSE.", col.name);
+                    storage.days[dest] = static_cast<int32_t>(day);
+                } else if (format == "tsu:UTC") {
+                    const long double instant = std::round((static_cast<long double>(value) -
+                        3653.0L * 86400.0L) * 1000000.0L);
+                    if (!std::isfinite(instant) || instant < static_cast<long double>(INT64_MIN) ||
+                        instant >= -static_cast<long double>(INT64_MIN))
+                        Rcpp::stop("Column '%s' contains an out-of-range timestamp; use dates = FALSE.", col.name);
+                    storage.instants[dest] = static_cast<int64_t>(instant);
+                } else storage.numbers[dest] = value;
+            }
+        }
+    }
+    const void* validity = result->null_count ? storage.validity.data() : nullptr;
+    if (text) storage.buffers = {validity, storage.offsets.data(), storage.text.data()};
+    else if (format == "tdD") storage.buffers = {validity, storage.days.data()};
+    else if (format == "tsu:UTC") storage.buffers = {validity, storage.instants.data()};
+    else storage.buffers = {validity, storage.numbers.data()};
+    sas_arrow::finish(*result);
+    return result;
+}
+
 } // namespace
 
 // [[Rcpp::export]]
-SEXP native_open(std::string path, std::vector<std::string> columns, std::string encoding, double bytes) {
+SEXP native_open(std::string path, std::vector<std::string> columns, std::string encoding,
+                 double bytes, Rcpp::Function date_kind) {
     std::unique_ptr<Reader> reader(new Reader(std::move(path), std::move(columns), std::move(encoding), bytes));
     reader->start();
     reader->await_schema();
+    // The worker is waiting for its first request. Classify once on R's main
+    // thread, using the same format rules as the public R interface.
+    for (auto& col : reader->columns) {
+        if (col.string || col.format.empty()) continue;
+        std::string kind = Rcpp::as<std::string>(date_kind(col.format));
+        if (kind == "date") col.date_kind = DateKind::Date;
+        else if (kind == "datetime") col.date_kind = DateKind::Datetime;
+        else if (kind == "time") col.date_kind = DateKind::Time;
+    }
     Rcpp::XPtr<Reader> ptr(reader.get(), true, Rf_install("anotherSAS7bdat_reader"));
     reader.release();
     return ptr;
 }
 
 // [[Rcpp::export]]
-SEXP native_next(SEXP ptr, int n) {
+SEXP native_next(SEXP ptr, int n, bool dates) {
     if (n < 1) Rcpp::stop("Chunk row limit must be positive.");
     Reader& reader = get_reader(ptr);
-    Batch* batch = reader.next(n);
-    if (!batch) return R_NilValue;
+    Delivery delivery = reader.next(n);
+    if (delivery.rows == 0) return R_NilValue;
     Rcpp::List result(reader.columns.size());
     Rcpp::CharacterVector names(reader.columns.size());
     for (size_t i = 0; i < reader.columns.size(); ++i) {
-        Rcpp::checkUserInterrupt();
+        reader.check_interrupt();
         const Column& col = reader.columns[i];
-        const Values& values = batch->columns[i];
+        const DateKind kind = dates ? col.date_kind : DateKind::Numeric;
         names[i] = utf8(col.name);
         Rcpp::RObject output;
         if (col.string) {
-            Rcpp::CharacterVector x(batch->rows);
-            for (int j = 0; j < batch->rows; ++j) {
-                if (j % 16384 == 0) Rcpp::checkUserInterrupt();
-                x[j] = utf8(values.strings[j]);
+            Rcpp::CharacterVector x(Rcpp::no_init(delivery.rows));
+            int dest = 0;
+            for (const auto& slice : delivery.slices) {
+                const Values& values = slice.batch->columns[i];
+                for (int j = slice.begin; j < slice.end; ++j, ++dest) {
+                    if (dest % 16384 == 0) reader.check_interrupt();
+                    size_t begin = values.offsets[j];
+                    size_t length = values.offsets[j + 1] - begin - 1;
+                    if (length > INT_MAX) Rcpp::stop("SAS string exceeds R's string length limit.");
+                    SET_STRING_ELT(x, dest, Rf_mkCharLenCE(values.text.data() + begin,
+                        static_cast<int>(length), CE_UTF8));
+                }
             }
             output = x;
         } else {
-            Rcpp::NumericVector x(batch->rows);
-            for (int j = 0; j < batch->rows; ++j) {
-                if (j % 16384 == 0) Rcpp::checkUserInterrupt();
-                x[j] = values.missing[j] ? missing_value(values.missing[j]) : values.numbers[j];
+            Rcpp::NumericVector x(Rcpp::no_init(delivery.rows));
+            const bool adjust = kind == DateKind::Date || kind == DateKind::Datetime;
+            const double epoch_offset = kind == DateKind::Date ? 3653.0 : 3653.0 * 86400.0;
+            int dest = 0;
+            for (const auto& slice : delivery.slices) {
+                const auto& numbers = slice.batch->columns[i].numbers;
+                for (int j = slice.begin; j < slice.end;) {
+                    reader.check_interrupt();
+                    int count = std::min(16384, slice.end - j);
+                    if (adjust) {
+                        for (int k = 0; k < count; ++k) {
+                            const double value = numbers[j + k];
+                            // Copy missing values without arithmetic to retain
+                            // the payload of SAS tagged NAs exactly.
+                            REAL(x)[dest + k] = std::isnan(value) ? value : value - epoch_offset;
+                        }
+                    } else {
+                        std::memcpy(REAL(x) + dest, numbers.data() + j, count * sizeof(double));
+                    }
+                    dest += count;
+                    j += count;
+                }
             }
             output = x;
         }
-        if (!col.label.empty()) output.attr("label") = utf8(col.label);
-        if (!col.format.empty()) output.attr("format.sas") = utf8(col.format);
+        if (kind == DateKind::Time) {
+            output.attr("units") = "secs";
+            output.attr("class") = Rcpp::CharacterVector::create("hms", "difftime");
+            if (!col.format.empty()) output.attr("format.sas") = utf8(col.format);
+            if (!col.label.empty()) output.attr("label") = utf8(col.label);
+        } else {
+            if (!col.label.empty()) output.attr("label") = utf8(col.label);
+            if (!col.format.empty()) output.attr("format.sas") = utf8(col.format);
+            if (kind == DateKind::Date) output.attr("class") = "Date";
+            else if (kind == DateKind::Datetime) {
+                output.attr("class") = Rcpp::CharacterVector::create("POSIXct", "POSIXt");
+                output.attr("tzone") = "UTC";
+            }
+        }
         result[i] = output;
     }
     result.attr("names") = names;
     result.attr("class") = "data.frame";
-    result.attr("row.names") = Rcpp::IntegerVector::create(NA_INTEGER, -batch->rows);
+    result.attr("row.names") = Rcpp::IntegerVector::create(NA_INTEGER, -delivery.rows);
     if (!reader.file_label.empty()) result.attr("label") = utf8(reader.file_label);
-    reader.consume();
+    reader.consume(delivery.rows);
+    return result;
+}
+
+// [[Rcpp::export]]
+SEXP native_arrow_schema(SEXP ptr, bool dates, std::vector<std::string> tags) {
+    return sas_arrow::export_schema(arrow_schema(get_reader(ptr), dates, tags));
+}
+
+// [[Rcpp::export]]
+SEXP native_arrow_next(SEXP ptr, int n, bool dates, std::vector<std::string> tags) {
+    if (n < 1) Rcpp::stop("Chunk row limit must be positive.");
+    Reader& reader = get_reader(ptr);
+    auto schema = arrow_schema(reader, dates, tags);
+    const Delivery delivery = reader.next(n);
+    if (delivery.rows == 0) return R_NilValue;
+    auto root = sas_arrow::array(delivery.rows);
+    auto& storage = *static_cast<sas_arrow::ArrayStorage*>(root->private_data);
+    storage.buffers = {nullptr}; // Struct arrays have one validity buffer.
+    storage.children.reserve(reader.columns.size() * 2);
+    for (size_t i = 0; i < reader.columns.size(); ++i) {
+        auto child = arrow_column(reader, delivery, i, dates, false);
+        storage.children.push_back(child.release());
+    }
+    for (size_t i = 0; i < tags.size(); ++i) {
+        if (tags[i].empty()) continue;
+        auto child = arrow_column(reader, delivery, i, false, true);
+        storage.children.push_back(child.release());
+    }
+    sas_arrow::finish(*root);
+    Rcpp::List result = Rcpp::List::create(
+        Rcpp::Named("array") = sas_arrow::export_array(std::move(root)),
+        Rcpp::Named("schema") = sas_arrow::export_schema(std::move(schema)));
+    reader.consume(delivery.rows);
     return result;
 }
 
@@ -442,6 +836,8 @@ Rcpp::List native_info(SEXP ptr) {
         Rcpp::Named("rows_total") = static_cast<double>(reader.total_rows),
         Rcpp::Named("rows_delivered") = static_cast<double>(reader.delivered),
         Rcpp::Named("rows_decoded") = static_cast<double>(reader.decoded.load()),
+        Rcpp::Named("estimation_rows") = static_cast<double>(reader.estimation_rows.load()),
+        Rcpp::Named("estimated_row_bytes") = reader.estimated_row_bytes.load(),
         Rcpp::Named("compression") = reader.compression,
         Rcpp::Named("encoding") = utf8(reader.file_encoding),
         Rcpp::Named("table_name") = utf8(reader.table_name), Rcpp::Named("label") = utf8(reader.file_label),
