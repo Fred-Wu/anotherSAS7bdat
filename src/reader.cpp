@@ -14,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "arrow-export.h"
 
 extern "C" {
 #include "readstat/readstat.h"
@@ -25,11 +26,14 @@ namespace {
 std::string text_or_empty(const char* value) { return value ? value : ""; }
 double missing_value(unsigned char code);
 
+enum class DateKind { Numeric, Date, Datetime, Time };
+
 struct Column {
     std::string name, label, format;
     bool string;
     size_t width;
     int source_index;
+    DateKind date_kind = DateKind::Numeric;
 };
 
 struct Values {
@@ -556,20 +560,150 @@ double missing_value(unsigned char code) {
 
 Rcpp::String utf8(const std::string& x) { return Rcpp::String(x.c_str(), CE_UTF8); }
 
+std::string arrow_format(const Column& col, bool dates) {
+    if (col.string) return "u";
+    if (dates && col.date_kind == DateKind::Date) return "tdD";
+    if (dates && col.date_kind == DateKind::Datetime) return "tsu:UTC";
+    // Keep SAS times as double seconds: SAS allows negative times, values
+    // beyond 24 hours and fractions that a Parquet time-of-day cannot retain.
+    return "g";
+}
+
+sas_arrow::Owner<ArrowSchema> arrow_schema(Reader& reader, bool dates,
+                                          const std::vector<std::string>& tags) {
+    if (tags.size() != reader.columns.size()) Rcpp::stop("Invalid SAS tag-column mapping.");
+    auto root = sas_arrow::schema("+s", "");
+    root->flags = 0;
+    sas_arrow::metadata(*root, {{"sas.table_name", reader.table_name},
+        {"sas.label", reader.file_label}, {"sas.encoding", reader.file_encoding}});
+    auto& storage = *static_cast<sas_arrow::SchemaStorage*>(root->private_data);
+    storage.children.reserve(reader.columns.size() * 2);
+    for (size_t i = 0; i < reader.columns.size(); ++i) {
+        const auto& col = reader.columns[i];
+        auto child = sas_arrow::schema(arrow_format(col, dates), col.name);
+        std::string kind = "numeric";
+        if (col.string) kind = "character";
+        else if (col.date_kind == DateKind::Date) kind = "date";
+        else if (col.date_kind == DateKind::Datetime) kind = "datetime";
+        else if (col.date_kind == DateKind::Time) kind = "time";
+        sas_arrow::metadata(*child, {{"sas.label", col.label}, {"sas.format", col.format},
+            {"sas.type", kind}, {"sas.missing_tags", tags[i]},
+            {"sas.units", !dates || kind == "numeric" || col.string ? "original" :
+                kind == "time" ? "seconds" : kind == "date" ? "days since 1970-01-01" :
+                "microseconds since 1970-01-01 UTC"}});
+        storage.children.push_back(child.release());
+    }
+    for (size_t i = 0; i < tags.size(); ++i) {
+        if (tags[i].empty()) continue;
+        auto child = sas_arrow::schema("u", tags[i]);
+        sas_arrow::metadata(*child, {{"sas.missing_for", reader.columns[i].name}});
+        storage.children.push_back(child.release());
+    }
+    sas_arrow::finish(*root);
+    return root;
+}
+
+sas_arrow::Owner<ArrowArray> arrow_column(Reader& reader, const Delivery& delivery,
+                                         size_t index, bool dates, bool tags) {
+    auto result = sas_arrow::array(delivery.rows);
+    auto& storage = *static_cast<sas_arrow::ArrayStorage*>(result->private_data);
+    const auto& col = reader.columns[index];
+    const auto format = tags ? "u" : arrow_format(col, dates);
+    const bool text = tags || col.string;
+    if (text) {
+        storage.offsets.reserve(static_cast<size_t>(delivery.rows) + 1);
+        storage.offsets.push_back(0);
+        // Reserve once using actual decoded text lengths, excluding per-cell NULs.
+        size_t bytes = tags ? delivery.rows : 0;
+        if (!tags) {
+            for (const auto& slice : delivery.slices) {
+                const auto& values = slice.batch->columns[index];
+                bytes += values.offsets[slice.end] - values.offsets[slice.begin] -
+                    static_cast<size_t>(slice.end - slice.begin);
+            }
+        }
+        if (bytes > INT_MAX) Rcpp::stop("A Parquet text batch exceeds 2 GiB; reduce chunk_rows.");
+        storage.text.reserve(bytes);
+    } else if (format == "tdD") storage.days.resize(delivery.rows);
+    else if (format == "tsu:UTC") storage.instants.resize(delivery.rows);
+    else storage.numbers.resize(delivery.rows);
+    if (!col.string || tags) sas_arrow::validity(storage, delivery.rows);
+
+    int dest = 0;
+    for (const auto& slice : delivery.slices) {
+        const auto& values = slice.batch->columns[index];
+        for (int j = slice.begin; j < slice.end; ++j, ++dest) {
+            if (dest % 16384 == 0) reader.check_interrupt();
+            if (tags) {
+                uint64_t bits;
+                const double value = values.numbers[j];
+                std::memcpy(&bits, &value, sizeof(bits));
+                unsigned char tag = static_cast<unsigned char>(bits >> 32);
+                if (std::isnan(value) && (tag == '_' || (tag >= 'a' && tag <= 'z'))) {
+                    storage.text.push_back(static_cast<char>(tag));
+                    sas_arrow::valid(storage, dest);
+                } else ++result->null_count;
+                storage.offsets.push_back(static_cast<int32_t>(storage.text.size()));
+            } else if (col.string) {
+                const auto begin = values.offsets[j];
+                const auto end = values.offsets[j + 1] - 1;
+                storage.text.insert(storage.text.end(), values.text.data() + begin,
+                                    values.text.data() + end);
+                storage.offsets.push_back(static_cast<int32_t>(storage.text.size()));
+            } else {
+                const double value = values.numbers[j];
+                if (std::isnan(value)) { ++result->null_count; continue; }
+                sas_arrow::valid(storage, dest);
+                if (format == "tdD") {
+                    const double day = value - 3653.0;
+                    if (!std::isfinite(day) || day != std::floor(day) ||
+                        day < INT32_MIN || day > INT32_MAX)
+                        Rcpp::stop("Column '%s' contains a date that cannot be stored losslessly; use dates = FALSE.", col.name);
+                    storage.days[dest] = static_cast<int32_t>(day);
+                } else if (format == "tsu:UTC") {
+                    const long double instant = std::round((static_cast<long double>(value) -
+                        3653.0L * 86400.0L) * 1000000.0L);
+                    if (!std::isfinite(instant) || instant < static_cast<long double>(INT64_MIN) ||
+                        instant >= -static_cast<long double>(INT64_MIN))
+                        Rcpp::stop("Column '%s' contains an out-of-range timestamp; use dates = FALSE.", col.name);
+                    storage.instants[dest] = static_cast<int64_t>(instant);
+                } else storage.numbers[dest] = value;
+            }
+        }
+    }
+    const void* validity = result->null_count ? storage.validity.data() : nullptr;
+    if (text) storage.buffers = {validity, storage.offsets.data(), storage.text.data()};
+    else if (format == "tdD") storage.buffers = {validity, storage.days.data()};
+    else if (format == "tsu:UTC") storage.buffers = {validity, storage.instants.data()};
+    else storage.buffers = {validity, storage.numbers.data()};
+    sas_arrow::finish(*result);
+    return result;
+}
+
 } // namespace
 
 // [[Rcpp::export]]
-SEXP native_open(std::string path, std::vector<std::string> columns, std::string encoding, double bytes) {
+SEXP native_open(std::string path, std::vector<std::string> columns, std::string encoding,
+                 double bytes, Rcpp::Function date_kind) {
     std::unique_ptr<Reader> reader(new Reader(std::move(path), std::move(columns), std::move(encoding), bytes));
     reader->start();
     reader->await_schema();
+    // The worker is waiting for its first request. Classify once on R's main
+    // thread, using the same format rules as the public R interface.
+    for (auto& col : reader->columns) {
+        if (col.string || col.format.empty()) continue;
+        std::string kind = Rcpp::as<std::string>(date_kind(col.format));
+        if (kind == "date") col.date_kind = DateKind::Date;
+        else if (kind == "datetime") col.date_kind = DateKind::Datetime;
+        else if (kind == "time") col.date_kind = DateKind::Time;
+    }
     Rcpp::XPtr<Reader> ptr(reader.get(), true, Rf_install("anotherSAS7bdat_reader"));
     reader.release();
     return ptr;
 }
 
 // [[Rcpp::export]]
-SEXP native_next(SEXP ptr, int n) {
+SEXP native_next(SEXP ptr, int n, bool dates) {
     if (n < 1) Rcpp::stop("Chunk row limit must be positive.");
     Reader& reader = get_reader(ptr);
     Delivery delivery = reader.next(n);
@@ -579,6 +713,7 @@ SEXP native_next(SEXP ptr, int n) {
     for (size_t i = 0; i < reader.columns.size(); ++i) {
         reader.check_interrupt();
         const Column& col = reader.columns[i];
+        const DateKind kind = dates ? col.date_kind : DateKind::Numeric;
         names[i] = utf8(col.name);
         Rcpp::RObject output;
         if (col.string) {
@@ -598,27 +733,83 @@ SEXP native_next(SEXP ptr, int n) {
             output = x;
         } else {
             Rcpp::NumericVector x(Rcpp::no_init(delivery.rows));
+            const bool adjust = kind == DateKind::Date || kind == DateKind::Datetime;
+            const double epoch_offset = kind == DateKind::Date ? 3653.0 : 3653.0 * 86400.0;
             int dest = 0;
             for (const auto& slice : delivery.slices) {
                 const auto& numbers = slice.batch->columns[i].numbers;
                 for (int j = slice.begin; j < slice.end;) {
                     reader.check_interrupt();
                     int count = std::min(16384, slice.end - j);
-                    std::memcpy(REAL(x) + dest, numbers.data() + j, count * sizeof(double));
+                    if (adjust) {
+                        for (int k = 0; k < count; ++k) {
+                            const double value = numbers[j + k];
+                            // Copy missing values without arithmetic to retain
+                            // the payload of SAS tagged NAs exactly.
+                            REAL(x)[dest + k] = std::isnan(value) ? value : value - epoch_offset;
+                        }
+                    } else {
+                        std::memcpy(REAL(x) + dest, numbers.data() + j, count * sizeof(double));
+                    }
                     dest += count;
                     j += count;
                 }
             }
             output = x;
         }
-        if (!col.label.empty()) output.attr("label") = utf8(col.label);
-        if (!col.format.empty()) output.attr("format.sas") = utf8(col.format);
+        if (kind == DateKind::Time) {
+            output.attr("units") = "secs";
+            output.attr("class") = Rcpp::CharacterVector::create("hms", "difftime");
+            if (!col.format.empty()) output.attr("format.sas") = utf8(col.format);
+            if (!col.label.empty()) output.attr("label") = utf8(col.label);
+        } else {
+            if (!col.label.empty()) output.attr("label") = utf8(col.label);
+            if (!col.format.empty()) output.attr("format.sas") = utf8(col.format);
+            if (kind == DateKind::Date) output.attr("class") = "Date";
+            else if (kind == DateKind::Datetime) {
+                output.attr("class") = Rcpp::CharacterVector::create("POSIXct", "POSIXt");
+                output.attr("tzone") = "UTC";
+            }
+        }
         result[i] = output;
     }
     result.attr("names") = names;
     result.attr("class") = "data.frame";
     result.attr("row.names") = Rcpp::IntegerVector::create(NA_INTEGER, -delivery.rows);
     if (!reader.file_label.empty()) result.attr("label") = utf8(reader.file_label);
+    reader.consume(delivery.rows);
+    return result;
+}
+
+// [[Rcpp::export]]
+SEXP native_arrow_schema(SEXP ptr, bool dates, std::vector<std::string> tags) {
+    return sas_arrow::export_schema(arrow_schema(get_reader(ptr), dates, tags));
+}
+
+// [[Rcpp::export]]
+SEXP native_arrow_next(SEXP ptr, int n, bool dates, std::vector<std::string> tags) {
+    if (n < 1) Rcpp::stop("Chunk row limit must be positive.");
+    Reader& reader = get_reader(ptr);
+    auto schema = arrow_schema(reader, dates, tags);
+    const Delivery delivery = reader.next(n);
+    if (delivery.rows == 0) return R_NilValue;
+    auto root = sas_arrow::array(delivery.rows);
+    auto& storage = *static_cast<sas_arrow::ArrayStorage*>(root->private_data);
+    storage.buffers = {nullptr}; // Struct arrays have one validity buffer.
+    storage.children.reserve(reader.columns.size() * 2);
+    for (size_t i = 0; i < reader.columns.size(); ++i) {
+        auto child = arrow_column(reader, delivery, i, dates, false);
+        storage.children.push_back(child.release());
+    }
+    for (size_t i = 0; i < tags.size(); ++i) {
+        if (tags[i].empty()) continue;
+        auto child = arrow_column(reader, delivery, i, false, true);
+        storage.children.push_back(child.release());
+    }
+    sas_arrow::finish(*root);
+    Rcpp::List result = Rcpp::List::create(
+        Rcpp::Named("array") = sas_arrow::export_array(std::move(root)),
+        Rcpp::Named("schema") = sas_arrow::export_schema(std::move(schema)));
     reader.consume(delivery.rows);
     return result;
 }

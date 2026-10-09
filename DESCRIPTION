@@ -16,7 +16,7 @@ Encoding: UTF-8
 Depends: R (>= 4.1.0)
 Imports: Rcpp, hms
 LinkingTo: Rcpp
-Suggests: testthat (>= 3.0.0), haven
+Suggests: testthat (>= 3.0.0), haven, arrow (>= 14.0.0)
 SystemRequirements: C++17, POSIX threads, iconv
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.1.0

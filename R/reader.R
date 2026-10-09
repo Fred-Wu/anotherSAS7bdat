@@ -135,8 +135,16 @@
 #'
 #'   SAS numerics are doubles. Special missing values use haven-compatible tagged
 #'   NAs; character padding is trimmed by ReadStat. Column labels and SAS formats
-#'   are retained as `label` and `format.sas` attributes. User-defined formats
-#'   and SAS catalog files are not interpreted. Files exceeding 2,147,483,647
+#'   are retained as `label` and `format.sas` attributes.
+#'
+#'   Date/time formats are identified once when the reader opens. With
+#'   `dates = TRUE`, conversion occurs while constructing each output column:
+#'   dates use R's epoch, datetimes use UTC, and times retain seconds as `hms`.
+#'   Missing values and their tags are preserved. With `dates = FALSE`, numeric
+#'   values remain in their original SAS units.
+#'
+#'   User-defined formats and SAS catalog files are not interpreted.
+#'   Files exceeding 2,147,483,647
 #'   physical observations are rejected in this version, before counter overflow.
 #'
 #'   To retain the entire dataset, you must explicitly save the chunks and
@@ -250,7 +258,8 @@ sas7bdat_open <- function(path, chunk_rows = 100000L,
   }
   path <- enc2utf8(normalizePath(path, winslash = "/", mustWork = TRUE))
   ptr <- native_open(path, if (is.null(columns)) character() else enc2utf8(columns),
-                     if (is.null(encoding)) "" else encoding, floor(chunk_bytes))
+                     if (is.null(encoding)) "" else encoding, floor(chunk_bytes),
+                     sas_date_kind)
   structure(list(ptr = ptr, chunk_rows = chunk_rows, dates = dates),
             class = "sas7bdat_reader")
 }
@@ -261,33 +270,7 @@ sas7bdat_read_chunk <- function(reader, n = NULL) {
   check_reader(reader)
   if (is.null(n)) n <- reader$chunk_rows
   n <- row_limit(n, "n")
-  chunk <- native_next(reader$ptr, n)
-  if (is.null(chunk) || !reader$dates) return(chunk)
-  for (j in seq_along(chunk)) {
-    x <- chunk[[j]]
-    fmt <- attr(x, "format.sas", exact = TRUE)
-    if (!is.double(x) || is.null(fmt)) next
-    kind <- sas_date_kind(fmt)
-    if (kind == "numeric") next
-    # Avoid arithmetic on tagged NAs, retaining their payloads exactly.
-    if (kind != "time") {
-      valid <- !is.na(x)
-      x[valid] <- x[valid] - if (kind == "date") 3653 else 3653 * 86400
-    }
-    if (kind == "date") class(x) <- "Date"
-    if (kind == "datetime") {
-      class(x) <- c("POSIXct", "POSIXt")
-      attr(x, "tzone") <- "UTC"
-    }
-    if (kind == "time") {
-      # Construct from bare doubles, then restore the SAS column metadata.
-      x <- hms::new_hms(as.numeric(x))
-      attr(x, "format.sas") <- fmt
-      attr(x, "label") <- attr(chunk[[j]], "label", exact = TRUE)
-    }
-    chunk[[j]] <- x
-  }
-  chunk
+  native_next(reader$ptr, n, reader$dates)
 }
 
 #' @rdname sas7bdat_read

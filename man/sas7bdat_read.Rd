@@ -173,8 +173,16 @@ MB and GB use powers of 1,000; MiB and GiB use powers of 1,024.
 
 SAS numerics are doubles. Special missing values use haven-compatible tagged
 NAs; character padding is trimmed by ReadStat. Column labels and SAS formats
-are retained as \code{label} and \code{format.sas} attributes. User-defined formats
-and SAS catalog files are not interpreted. Files exceeding 2,147,483,647
+are retained as \code{label} and \code{format.sas} attributes.
+
+Date/time formats are identified once when the reader opens. With
+\code{dates = TRUE}, conversion occurs while constructing each output column:
+dates use R's epoch, datetimes use UTC, and times retain seconds as \code{hms}.
+Missing values and their tags are preserved. With \code{dates = FALSE}, numeric
+values remain in their original SAS units.
+
+User-defined formats and SAS catalog files are not interpreted.
+Files exceeding 2,147,483,647
 physical observations are rejected in this version, before counter overflow.
 
 To retain the entire dataset, you must explicitly save the chunks and
