@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cctype>
 #include <cstring>
@@ -45,22 +46,33 @@ struct Batch {
     std::vector<uint64_t> row_ends;
     explicit Batch(size_t n) : columns(n) {}
 
-    void reset(const std::vector<Column>& schema, size_t capacity) {
+    void reset(const std::vector<Column>& schema) {
         rows = 0;
         bytes = 0;
         row_ends.clear();
-        row_ends.reserve(capacity);
         for (size_t i = 0; i < schema.size(); ++i) {
             auto& values = columns[i];
             if (schema[i].string) {
                 values.text.clear();
                 values.offsets.clear();
-                values.offsets.reserve(capacity + 1);
                 values.offsets.push_back(0);
-                // Avoid reserving the full declared SAS width for sparse text.
-                values.text.reserve(capacity * std::min<size_t>(schema[i].width + 1, 64));
             } else {
                 values.numbers.clear();
+            }
+        }
+    }
+
+    void reserve(const std::vector<Column>& schema, size_t capacity,
+                 const std::vector<double>& text_per_row, bool sampled) {
+        row_ends.reserve(capacity);
+        for (size_t i = 0; i < schema.size(); ++i) {
+            auto& values = columns[i];
+            if (schema[i].string) {
+                values.offsets.reserve(capacity + 1);
+                double width = sampled ? text_per_row[i] * 1.25 :
+                    std::min<size_t>(schema[i].width + 1, 64);
+                values.text.reserve(static_cast<size_t>(std::ceil(capacity * width)));
+            } else {
                 values.numbers.reserve(capacity);
             }
         }
@@ -91,6 +103,8 @@ public:
     int64_t total_rows = 0;
     uint64_t delivered = 0;
     std::atomic<uint64_t> opens{0}, closes{0}, bytes_read{0}, seeks{0}, decoded{0};
+    std::atomic<uint64_t> estimation_rows{0};
+    std::atomic<double> estimated_row_bytes{0};
     std::atomic<bool> cancelled{false};
     bool closed = false; // Main thread only.
 
@@ -129,7 +143,7 @@ public:
         uint64_t bytes = 0;
         size_t index = 0;
         int begin = pending_offset;
-        while (result.rows < n && bytes < byte_target) {
+        while (result.rows < n && (!byte_target || bytes < byte_target)) {
             if (index == pending.size()) {
                 wait_main(lock, [this] { return ready || done; });
                 if (!ready) {
@@ -145,10 +159,12 @@ public:
             uint64_t base = begin == 0 ? 0 : batch.row_ends[begin - 1];
             // Split or combine prefetched batches when n changes. The byte
             // target still ends at the first complete row that reaches it.
-            auto stop = std::lower_bound(batch.row_ends.begin() + begin,
-                batch.row_ends.begin() + end, base + byte_target - bytes);
-            if (stop != batch.row_ends.begin() + end)
-                end = static_cast<int>(stop - batch.row_ends.begin()) + 1;
+            if (byte_target) {
+                auto stop = std::lower_bound(batch.row_ends.begin() + begin,
+                    batch.row_ends.begin() + end, base + byte_target - bytes);
+                if (stop != batch.row_ends.begin() + end)
+                    end = static_cast<int>(stop - batch.row_ends.begin()) + 1;
+            }
             result.slices.push_back({&batch, begin, end});
             result.rows += end - begin;
             bytes += batch.row_ends[end - 1] - base;
@@ -213,6 +229,10 @@ private:
     int pending_offset = 0;
     int batch_rows = 0;
     uint64_t minimum_row_bytes = 8; // Row-end index, in addition to cell estimates.
+    static constexpr int sample_limit = 256;
+    int sample_rows = 0, batch_sample_rows = 0;
+    std::vector<uint64_t> sample_text_bytes;
+    std::vector<double> text_per_row;
     double missing_values[256];
     std::exception_ptr failure, worker_exception;
     std::string detail;
@@ -244,6 +264,56 @@ private:
         return !cancelled.load();
     }
 
+    void refresh_estimate() {
+        double bytes = static_cast<double>(minimum_row_bytes - 8);
+        for (size_t i = 0; i < columns.size(); ++i)
+            if (columns[i].string) bytes += text_per_row[i] - 1;
+        estimated_row_bytes.store(bytes);
+        estimation_rows.store(sample_rows);
+    }
+
+    void sample_current(int rows) {
+        int added = rows - batch_sample_rows;
+        if (!added) return;
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (columns[i].string) {
+                const auto& offsets = current->columns[i].offsets;
+                sample_text_bytes[i] += offsets[rows] - offsets[batch_sample_rows];
+                text_per_row[i] = static_cast<double>(sample_text_bytes[i]) / (sample_rows + added);
+            }
+        }
+        sample_rows += added;
+        batch_sample_rows = rows;
+        refresh_estimate();
+    }
+
+    void finish_batch() {
+        if (sample_rows < sample_limit) {
+            sample_current(std::min(current->rows, batch_sample_rows + sample_limit - sample_rows));
+        } else {
+            // Update once per batch, using arena lengths already collected.
+            // Blend the latest batch with the previous estimate to reduce churn.
+            for (size_t i = 0; i < columns.size(); ++i)
+                if (columns[i].string)
+                    text_per_row[i] = (text_per_row[i] +
+                        static_cast<double>(current->columns[i].text.size()) / current->rows) / 2;
+            refresh_estimate();
+        }
+    }
+
+    void reserve_current() {
+        uint64_t remaining = static_cast<uint64_t>(total_rows) - decoded.load() + current->rows;
+        size_t capacity = static_cast<size_t>(std::min<uint64_t>(remaining, batch_rows));
+        bool sampled = sample_rows == sample_limit;
+        if (!sampled) capacity = std::min<size_t>(capacity, sample_limit - sample_rows);
+        if (byte_target) {
+            double row_bytes = sampled ? estimated_row_bytes.load() : minimum_row_bytes;
+            double fit = std::ceil(byte_target / std::max(1.0, row_bytes) * (sampled ? 1.25 : 1));
+            capacity = static_cast<size_t>(std::min<double>(capacity, fit));
+        }
+        current->reserve(columns, capacity, text_per_row, sampled);
+    }
+
     void prepare_batch(std::unique_lock<std::mutex>& lock) {
         batch_rows = requested_rows;
         if (!recycled.empty()) {
@@ -252,10 +322,9 @@ private:
         }
         lock.unlock();
         if (!current) current.reset(new Batch(columns.size()));
-        uint64_t remaining = static_cast<uint64_t>(total_rows) - decoded.load();
-        size_t capacity = static_cast<size_t>(std::min<uint64_t>(remaining,
-            std::min<uint64_t>(batch_rows, std::max<uint64_t>(1, byte_target / minimum_row_bytes))));
-        current->reset(columns, capacity);
+        current->reset(columns);
+        batch_sample_rows = 0;
+        reserve_current();
     }
 
     int finish_schema() {
@@ -280,6 +349,8 @@ private:
             last_selected = std::max(last_selected, columns[i].source_index);
             minimum_row_bytes += columns[i].string ? sizeof(std::string) + 1 + 72 : 9;
         }
+        sample_text_bytes.assign(columns.size(), 0);
+        text_per_row.assign(columns.size(), 1); // Includes each cell's terminator.
         std::unique_lock<std::mutex> lock(mutex);
         schema_ready = true;
         cv.notify_all();
@@ -289,6 +360,7 @@ private:
     }
 
     int publish_and_wait() {
+        finish_batch();
         std::unique_lock<std::mutex> lock(mutex);
         cv.wait(lock, [this] { return !ready || cancelled.load(); });
         if (cancelled.load()) return READSTAT_HANDLER_ABORT;
@@ -364,8 +436,13 @@ private:
                 ++self->current->rows;
                 self->current->row_ends.push_back(self->current->bytes);
                 ++self->decoded;
+                if (self->sample_rows < sample_limit && self->current->rows - self->batch_sample_rows ==
+                        sample_limit - self->sample_rows) {
+                    self->sample_current(self->current->rows);
+                    self->reserve_current();
+                }
                 if (self->current->rows >= self->batch_rows ||
-                        self->current->bytes >= self->byte_target)
+                        (self->byte_target && self->current->bytes >= self->byte_target))
                     return self->publish_and_wait();
             }
             return static_cast<int>(READSTAT_HANDLER_OK);
@@ -441,6 +518,7 @@ private:
                 if (!detail.empty()) message += ": " + detail;
                 throw std::runtime_error(message);
             }
+            if (!cancelled.load() && current && current->rows > 0) finish_batch();
         } catch (...) { error = std::current_exception(); }
         close_cb(this); // Also covers unexpected native exceptions.
         std::unique_lock<std::mutex> lock(mutex);
@@ -567,6 +645,8 @@ Rcpp::List native_info(SEXP ptr) {
         Rcpp::Named("rows_total") = static_cast<double>(reader.total_rows),
         Rcpp::Named("rows_delivered") = static_cast<double>(reader.delivered),
         Rcpp::Named("rows_decoded") = static_cast<double>(reader.decoded.load()),
+        Rcpp::Named("estimation_rows") = static_cast<double>(reader.estimation_rows.load()),
+        Rcpp::Named("estimated_row_bytes") = reader.estimated_row_bytes.load(),
         Rcpp::Named("compression") = reader.compression,
         Rcpp::Named("encoding") = utf8(reader.file_encoding),
         Rcpp::Named("table_name") = utf8(reader.table_name), Rcpp::Named("label") = utf8(reader.file_label),

@@ -1,17 +1,3 @@
-example_path <- function(compression) {
-  system.file("examples", paste0("example_", compression, ".sas7bdat"),
-              package = "anotherSAS7bdat")
-}
-
-wait_for_decoded <- function(reader, rows) {
-  deadline <- Sys.time() + 5
-  repeat {
-    info <- sas7bdat_info(reader)
-    if (info$rows_decoded >= rows || Sys.time() >= deadline) return(info)
-    Sys.sleep(0.01)
-  }
-}
-
 test_that("read-ahead progresses during processing and stops at its bound", {
   for (compression in c("uncompressed", "rle", "rdc")) {
     reader <- sas7bdat_open(example_path(compression), chunk_rows = 7L)
