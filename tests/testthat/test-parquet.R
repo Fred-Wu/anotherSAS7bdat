@@ -12,15 +12,23 @@ test_that("native Parquet conversion matches all three SAS compression types", {
     expect_equal(result$rows, 120)
     expect_equal(result$chunks, 8)
     expect_true(result$completed)
+    expect_identical(names(actual), names(expected))
+    expect_length(result$missing_tag_columns, 0)
     expect_equal(plain_values(actual[names(expected)]), plain_values(expected), tolerance = 1e-6)
     expect_identical(class(actual$visit_date), "Date")
     expect_s3_class(actual$recorded_at, "POSIXct")
     expect_identical(attr(actual$recorded_at, "tzone"), "UTC")
+    expect_s3_class(actual$visit_time, "hms")
+    expect_identical(format(actual$visit_time[1:2]), c("09:00:30", "09:01:00"))
     for (name in names(expected)) {
       field <- table$schema$GetFieldByName(name)
       metadata <- collected$info$columns[match(name, collected$info$columns$name), ]
       expect_identical(field$metadata[["sas.label"]], metadata$label)
       expect_identical(field$metadata[["sas.format"]], metadata$format)
+      expect_identical(attr(actual[[name]], "label"),
+                       if (nzchar(metadata$label)) metadata$label else NULL)
+      expect_identical(attr(actual[[name]], "format.sas"),
+                       if (nzchar(metadata$format)) metadata$format else NULL)
     }
     parquet <- arrow::ParquetFileReader$create(output)
     expect_equal(parquet$num_row_groups, 8)
@@ -61,12 +69,17 @@ test_that("special missing tags and temporal edge cases are preserved explicitly
   attr(input$time, "label") <- "Extended hours"
   path <- tempfile(fileext = ".sas7bdat")
   output <- paste0(tempfile(), "-\u6d4b\u8bd5.parquet")
-  on.exit(unlink(c(path, output)))
+  default_output <- tempfile(fileext = ".parquet")
+  numeric_output <- tempfile(fileext = ".parquet")
+  on.exit(unlink(c(path, output, default_output, numeric_output)))
   suppressWarnings(haven::write_sas(input, path))
-  result <- sas7bdat_to_parquet(path, output, chunk_rows = 3L)
+  result <- sas7bdat_to_parquet(path, output, chunk_rows = 3L, missing_tags = TRUE)
   data <- arrow::read_parquet(output)
   raw <- collect_chunks(path, dates = FALSE)$data
   expect_equal(data$time, raw$time, ignore_attr = TRUE)
+  expect_s3_class(data$time, "hms")
+  expect_identical(trimws(format(data$time[1:4])),
+                   c("00:00:00.000", "-00:00:01.500", "25:01:01.250", "00:00:00.125"))
   expect_identical(is.na(data$number), is.na(raw$number))
   expect_identical(data$text, raw$text)
   expect_identical(data$number__sas_missing, rep("existing", length(values)))
@@ -74,6 +87,18 @@ test_that("special missing tags and temporal edge cases are preserved explicitly
   for (name in c("time", "number")) {
     expect_identical(data[[result$missing_tag_columns[[name]]]], haven::na_tag(raw[[name]]))
   }
+  result <- sas7bdat_to_parquet(path, default_output)
+  data <- arrow::read_parquet(default_output)
+  expect_identical(names(data), names(input))
+  expect_length(result$missing_tag_columns, 0)
+  expect_s3_class(data$time, "hms")
+  expect_identical(is.na(data$number), is.na(raw$number))
+  expect_identical(data$number__sas_missing, rep("existing", length(values)))
+
+  sas7bdat_to_parquet(path, numeric_output, dates = FALSE)
+  data <- arrow::read_parquet(numeric_output)
+  expect_null(attr(data$time, "class"))
+  expect_equal(data$time, raw$time, ignore_attr = TRUE)
 })
 
 test_that("date precision checks leave no incomplete published output", {
@@ -108,7 +133,7 @@ test_that("schema-only files and native exports survive cleanup", {
   result <- sas7bdat_to_parquet(path, output)
   expect_equal(result$rows, 0)
   expect_equal(result$chunks, 0)
-  expect_identical(names(arrow::read_parquet(output)), c("id", "text", "id__sas_missing"))
+  expect_identical(names(arrow::read_parquet(output)), c("id", "text"))
 
   reader <- sas7bdat_open(example_path("uncompressed"))
   on.exit(sas7bdat_close(reader), add = TRUE)

@@ -21,12 +21,19 @@ through_r <- function(output) {
   })
   result <- sas7bdat_read(path, chunk_rows = 100000L, callback = function(chunk) {
     # Match the direct function's lossless double-second storage for SAS times.
+    time_attributes <- list()
     for (name in names(chunk)) {
       if (inherits(chunk[[name]], "hms")) {
+        time_attributes[[name]] <- attributes(chunk[[name]])
         attributes(chunk[[name]])[c("class", "units")] <- NULL
       }
     }
     batch <- arrow::RecordBatch$create(chunk)
+    metadata <- batch$schema$metadata
+    for (name in names(time_attributes)) {
+      metadata$r$columns[[name]] <- list(attributes = time_attributes[[name]])
+    }
+    batch <- batch$ReplaceSchemaMetadata(metadata)
     if (is.null(writer)) {
       writer <<- arrow::ParquetFileWriter$create(
         batch$schema, sink,
@@ -44,7 +51,7 @@ through_r <- function(output) {
 engines <- list(
   through_R = through_r,
   direct = function(output) sas7bdat_to_parquet(path, output, missing_tags = FALSE),
-  direct_with_tags = function(output) sas7bdat_to_parquet(path, output)
+  direct_with_tags = function(output) sas7bdat_to_parquet(path, output, missing_tags = TRUE)
 )
 output_path <- function(engine) file.path(directory, paste0(engine, ".parquet"))
 run <- function(engine, remove = TRUE) {

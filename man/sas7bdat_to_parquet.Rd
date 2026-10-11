@@ -13,7 +13,7 @@ sas7bdat_to_parquet(
   encoding = NULL,
   dates = TRUE,
   compression = "snappy",
-  missing_tags = TRUE
+  missing_tags = FALSE
 )
 }
 \arguments{
@@ -37,19 +37,21 @@ automatically from decoded rows and uses \code{chunk_rows} to end each chunk.}
 to use the encoding recorded in the file.}
 
 \item{dates}{Whether to convert recognized SAS dates and datetimes to
-Parquet date and UTC timestamp types. SAS times remain double seconds.
+Parquet date and UTC timestamp types. SAS times retain double seconds and
+are restored as \code{hms} when imported into R with arrow.
 Set to \code{FALSE} to retain all original SAS numeric values.}
 
 \item{compression}{Parquet compression codec, for example \code{"snappy"},
 \code{"zstd"}, or \code{"uncompressed"}, supported by your arrow installation.}
 
 \item{missing_tags}{Whether to retain SAS special missing tags in additional
-character columns. The default, \code{TRUE}, adds one \verb{<name>__sas_missing}
+character columns. The default, \code{FALSE}, keeps the original column set.
+Set to \code{TRUE} to add one \verb{<name>__sas_missing}
 column for each numeric source column, with unique names when necessary.
 These contain \code{"a"} through \code{"z"} or \code{"_"} for special missing values,
 and null otherwise. Numeric missing values themselves become Parquet nulls.
-Set to \code{FALSE} to omit the tag columns and discard the distinction between
-ordinary and special missing values.}
+With \code{FALSE}, ordinary and special missing values both become nulls;
+their missing status is preserved but special codes are discarded.}
 }
 \value{
 An invisible list containing \code{path}, \code{rows}, \code{chunks}, \code{completed},
@@ -76,15 +78,19 @@ With \code{dates = TRUE}, recognized SAS dates become Parquet dates (days since
 1970-01-01), and datetimes become UTC timestamps rounded to the nearest
 microsecond. Fractional dates and out-of-range temporal values cause an
 error. SAS times remain double seconds, preserving negative times, values
-beyond 24 hours, and fractional seconds. With \code{dates = FALSE}, all numeric
+beyond 24 hours, and fractional seconds. R metadata restores their \code{hms}
+class and \code{HH:MM:SS} display when read with \code{arrow::read_parquet()} or
+converted from an Arrow table to an R data frame. With \code{dates = FALSE}, all numeric
 values retain their original SAS units and double precision, including
 sub-microsecond datetime values.
 
 File metadata retains \code{sas.table_name}, \code{sas.label}, and \code{sas.encoding}.
 Each field retains \code{sas.label}, \code{sas.format}, \code{sas.type}, \code{sas.units}, and
 \code{sas.missing_tags}; tag fields identify their source in \code{sas.missing_for}.
-These are Arrow schema metadata, rather than R column attributes. Inspect
-them with \code{arrow::read_parquet(output, as_data_frame = FALSE)$schema}.
+R metadata also restores column \code{label} and \code{format.sas} attributes and the
+file label on import. Other Parquet clients see times as double seconds.
+Inspect the schema metadata with
+\code{arrow::read_parquet(output, as_data_frame = FALSE)$schema}.
 
 Conversion writes a temporary file in the output directory and publishes
 it only after reading and writing finish successfully. Errors and interrupts

@@ -9,15 +9,17 @@
 #' @param compression Parquet compression codec, for example `"snappy"`,
 #'   `"zstd"`, or `"uncompressed"`, supported by your arrow installation.
 #' @param dates Whether to convert recognized SAS dates and datetimes to
-#'   Parquet date and UTC timestamp types. SAS times remain double seconds.
+#'   Parquet date and UTC timestamp types. SAS times retain double seconds and
+#'   are restored as `hms` when imported into R with arrow.
 #'   Set to `FALSE` to retain all original SAS numeric values.
 #' @param missing_tags Whether to retain SAS special missing tags in additional
-#'   character columns. The default, `TRUE`, adds one `<name>__sas_missing`
+#'   character columns. The default, `FALSE`, keeps the original column set.
+#'   Set to `TRUE` to add one `<name>__sas_missing`
 #'   column for each numeric source column, with unique names when necessary.
 #'   These contain `"a"` through `"z"` or `"_"` for special missing values,
 #'   and null otherwise. Numeric missing values themselves become Parquet nulls.
-#'   Set to `FALSE` to omit the tag columns and discard the distinction between
-#'   ordinary and special missing values.
+#'   With `FALSE`, ordinary and special missing values both become nulls;
+#'   their missing status is preserved but special codes are discarded.
 #' @return An invisible list containing `path`, `rows`, `chunks`, `completed`,
 #'   and `missing_tag_columns`, a named mapping from numeric source columns to
 #'   their tag columns (empty when `missing_tags = FALSE`).
@@ -37,15 +39,19 @@
 #' 1970-01-01), and datetimes become UTC timestamps rounded to the nearest
 #' microsecond. Fractional dates and out-of-range temporal values cause an
 #' error. SAS times remain double seconds, preserving negative times, values
-#' beyond 24 hours, and fractional seconds. With `dates = FALSE`, all numeric
+#' beyond 24 hours, and fractional seconds. R metadata restores their `hms`
+#' class and `HH:MM:SS` display when read with `arrow::read_parquet()` or
+#' converted from an Arrow table to an R data frame. With `dates = FALSE`, all numeric
 #' values retain their original SAS units and double precision, including
 #' sub-microsecond datetime values.
 #'
 #' File metadata retains `sas.table_name`, `sas.label`, and `sas.encoding`.
 #' Each field retains `sas.label`, `sas.format`, `sas.type`, `sas.units`, and
 #' `sas.missing_tags`; tag fields identify their source in `sas.missing_for`.
-#' These are Arrow schema metadata, rather than R column attributes. Inspect
-#' them with `arrow::read_parquet(output, as_data_frame = FALSE)$schema`.
+#' R metadata also restores column `label` and `format.sas` attributes and the
+#' file label on import. Other Parquet clients see times as double seconds.
+#' Inspect the schema metadata with
+#' `arrow::read_parquet(output, as_data_frame = FALSE)$schema`.
 #'
 #' Conversion writes a temporary file in the output directory and publishes
 #' it only after reading and writing finish successfully. Errors and interrupts
@@ -64,7 +70,7 @@
 sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
                                chunk_bytes = NULL, columns = NULL,
                                encoding = NULL, dates = TRUE,
-                               compression = "snappy", missing_tags = TRUE) {
+                               compression = "snappy", missing_tags = FALSE) {
   if (!requireNamespace("arrow", quietly = TRUE)) {
     stop("Install the optional arrow package to convert to Parquet.", call. = FALSE)
   }
@@ -96,6 +102,7 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
     tags[numeric] <- names[-seq_along(fields)]
   }
   schema <- arrow::Schema$import_from_c(native_arrow_schema(reader$ptr, dates, tags))
+  schema <- parquet_r_metadata(schema, dates)
   properties <- arrow::ParquetWriterProperties$create(
     schema$names, version = "2.6", compression = compression
   )
@@ -127,4 +134,31 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
   names(mapping) <- fields[nzchar(tags)]
   invisible(list(path = output, rows = rows, chunks = chunks, completed = TRUE,
                  missing_tag_columns = mapping))
+}
+
+# Attach column attributes once to the writer schema. Only schema metadata is
+# constructed in R; all dataset values continue through the native batch path.
+parquet_r_metadata <- function(schema, dates) {
+  columns <- lapply(schema$fields, function(field) {
+    metadata <- field$metadata
+    attributes <- list()
+    if (!is.null(metadata[["sas.label"]]) && nzchar(metadata[["sas.label"]])) {
+      attributes$label <- metadata[["sas.label"]]
+    }
+    if (!is.null(metadata[["sas.format"]]) && nzchar(metadata[["sas.format"]])) {
+      attributes$format.sas <- metadata[["sas.format"]]
+    }
+    if (dates && identical(metadata[["sas.type"]], "time")) {
+      attributes$class <- c("hms", "difftime")
+      attributes$units <- "secs"
+    }
+    if (length(attributes)) list(attributes = attributes) else NULL
+  })
+  names(columns) <- schema$names
+  metadata <- schema$metadata
+  metadata$r <- list(columns = columns)
+  if (nzchar(metadata[["sas.label"]])) {
+    metadata$r$attributes <- list(label = metadata[["sas.label"]])
+  }
+  schema$WithMetadata(metadata)
 }
