@@ -164,9 +164,35 @@ test_that("writer and decoder errors clean up temporary Parquet files", {
     if (calls == 2L) stop("decoder failed")
     native_next_batch(...)
   }, .package = "anotherSAS7bdat")
-  expect_error(sas7bdat_to_parquet(example_path("rdc"), output, chunk_rows = 17L), "decoder failed")
+  progress_text <- capture.output(
+    expect_error(sas7bdat_to_parquet(example_path("rdc"), output,
+                                    chunk_rows = 17L, progress = TRUE), "decoder failed")
+  )
+  expect_true(any(grepl("0%", progress_text, fixed = TRUE)))
+  expect_false(any(grepl("100%", progress_text, fixed = TRUE)))
   expect_equal(calls, 2L)
   expect_length(list.files(directory, all.files = TRUE, no.. = TRUE), 0)
+})
+
+test_that("Parquet progress reports written batches and successful completion", {
+  skip_if_not_installed("arrow", "14.0.0")
+  output <- tempfile(fileext = ".parquet")
+  quiet_output <- tempfile(fileext = ".parquet")
+  on.exit(unlink(c(output, quiet_output)))
+  progress_text <- capture.output(
+    result <- sas7bdat_to_parquet(example_path("rle"), output,
+                                  chunk_rows = 60L, progress = TRUE)
+  )
+  expect_true(any(grepl("50%", progress_text, fixed = TRUE)))
+  expect_true(any(grepl("100%", progress_text, fixed = TRUE)))
+  expect_true(result$completed)
+  expect_equal(nrow(arrow::read_parquet(output)), result$rows)
+
+  quiet_text <- capture.output(
+    sas7bdat_to_parquet(example_path("rle"), quiet_output, progress = FALSE)
+  )
+  expect_length(quiet_text, 0)
+  expect_identical(arrow::read_parquet(output), arrow::read_parquet(quiet_output))
 })
 
 test_that("a writer failure does not publish a partial file", {

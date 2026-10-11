@@ -20,6 +20,11 @@
 #'   and null otherwise. Numeric missing values themselves become Parquet nulls.
 #'   With `FALSE`, ordinary and special missing values both become nulls;
 #'   their missing status is preserved but special codes are discarded.
+#' @param progress A logical value. Set to `TRUE` to show a console progress
+#'   bar, or `FALSE` to hide it. The default, `interactive()`, shows the bar
+#'   in interactive R sessions and hides it when running via `Rscript`.
+#'   Progress uses the SAS row count and updates after each batch is written.
+#'   It reaches 100% only after the completed output file is published.
 #' @return An invisible list containing `path`, `rows`, `chunks`, `completed`,
 #'   and `missing_tag_columns`, a named mapping from numeric source columns to
 #'   their tag columns (empty when `missing_tags = FALSE`).
@@ -70,7 +75,8 @@
 sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
                                chunk_bytes = NULL, columns = NULL,
                                encoding = NULL, dates = TRUE,
-                               compression = "snappy", missing_tags = FALSE) {
+                               compression = "snappy", missing_tags = FALSE,
+                               progress = interactive()) {
   if (!requireNamespace("arrow", quietly = TRUE)) {
     stop("Install the optional arrow package to convert to Parquet.", call. = FALSE)
   }
@@ -79,18 +85,22 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
   if (!is.logical(missing_tags) || length(missing_tags) != 1L || is.na(missing_tags)) {
     stop("`missing_tags` must be TRUE or FALSE.", call. = FALSE)
   }
+  if (!is.logical(progress) || length(progress) != 1L || is.na(progress)) {
+    stop("`progress` must be TRUE or FALSE.", call. = FALSE)
+  }
   directory <- normalizePath(dirname(output), winslash = "/", mustWork = TRUE)
   output <- file.path(directory, basename(output))
   if (file.exists(output)) stop("`output` already exists.", call. = FALSE)
 
   reader <- sas7bdat_open(path, chunk_rows, chunk_bytes, columns, encoding, dates)
   temporary <- tempfile(".sas-parquet-", tmpdir = directory)
-  writer <- sink <- NULL
+  writer <- sink <- progress_bar <- NULL
   on.exit({
     sas7bdat_close(reader)
     if (!is.null(writer)) try(writer$Close(), silent = TRUE)
     if (!is.null(sink)) try(sink$close(), silent = TRUE)
     unlink(temporary)
+    if (!is.null(progress_bar)) close(progress_bar)
   }, add = TRUE)
 
   info <- sas7bdat_info(reader)
@@ -108,6 +118,7 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
   )
   sink <- arrow::FileOutputStream$create(temporary)
   writer <- arrow::ParquetFileWriter$create(schema, sink, properties = properties)
+  if (progress) progress_bar <- utils::txtProgressBar(min = 0, max = 1, style = 3)
   rows <- chunks <- 0
   repeat {
     exported <- native_arrow_next(reader$ptr, reader$chunk_rows, dates, tags)
@@ -116,6 +127,9 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
     writer$WriteBatch(batch, chunk_size = reader$chunk_rows)
     rows <- rows + batch$num_rows
     chunks <- chunks + 1
+    if (!is.null(progress_bar)) {
+      utils::setTxtProgressBar(progress_bar, min(rows / max(1, info$rows_total), 0.99))
+    }
     rm(batch, exported)
     # These buffers are native allocations, invisible to R's allocation-driven
     # GC trigger. Collect each consumed batch, including WriteBatch's temporary
@@ -130,6 +144,7 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
   if (file.exists(output) || !file.rename(temporary, output)) {
     stop("Could not publish the completed Parquet file at `output`.", call. = FALSE)
   }
+  if (!is.null(progress_bar)) utils::setTxtProgressBar(progress_bar, 1)
   mapping <- tags[nzchar(tags)]
   names(mapping) <- fields[nzchar(tags)]
   invisible(list(path = output, rows = rows, chunks = chunks, completed = TRUE,

@@ -13,7 +13,8 @@ sas7bdat_to_parquet(
   encoding = NULL,
   dates = TRUE,
   compression = "snappy",
-  missing_tags = FALSE
+  missing_tags = FALSE,
+  progress = interactive()
 )
 }
 \arguments{
@@ -52,6 +53,12 @@ These contain \code{"a"} through \code{"z"} or \code{"_"} for special missing va
 and null otherwise. Numeric missing values themselves become Parquet nulls.
 With \code{FALSE}, ordinary and special missing values both become nulls;
 their missing status is preserved but special codes are discarded.}
+
+\item{progress}{A logical value. Set to \code{TRUE} to show a console progress
+bar, or \code{FALSE} to hide it. The default, \code{interactive()}, shows the bar
+in interactive R sessions and hides it when running via \code{Rscript}.
+Progress uses the SAS row count and updates after each batch is written.
+It reaches 100\% only after the completed output file is published.}
 }
 \value{
 An invisible list containing \code{path}, \code{rows}, \code{chunks}, \code{completed},
