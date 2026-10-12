@@ -8,6 +8,11 @@ the [ReadStat](https://github.com/WizardMac/ReadStat) C library by
 continues between chunks without restarting the parser. Each chunk is an R
 data frame.
 
+It also converts SAS files directly to one Parquet file with
+`sas7bdat_to_parquet()`. Decoded values stay in native buffers and pass through
+the Arrow C Data Interface to the optional **arrow** package, without
+constructing intermediate R data frames or collecting the whole dataset.
+
 ## Installation
 
 Install the development version from GitHub:
@@ -19,6 +24,12 @@ remotes::install_github("Fred-Wu/anotherSAS7bdat")
 
 Source installation requires Rtools on Windows, or C++ build tools on macOS
 and Linux.
+
+For SAS-to-Parquet conversion, also install **arrow** (version 14.0.0 or later):
+
+```r
+install.packages("arrow")
+```
 
 ## Usage
 
@@ -32,6 +43,8 @@ Each contains the same 120 rows with numeric values, Unicode text, dates,
 times, datetimes, column labels, and ordinary and special missing values.
 Use any of these filenames in `system.file()` below. SAS is not needed to
 read the bundled files.
+
+### Reading into R
 
 Both examples below read the entire file into `sas_data`, an R data frame.
 The complete dataset and temporary chunks must fit in memory.
@@ -94,7 +107,53 @@ rm(chunks)
 The loop reads until `NULL` signals the end of the file, then closes the reader.
 Use `sas7bdat_info(reader)` to inspect its current status and reading information.
 
-See `?sas7bdat_read` for all five functions and their settings.
+See `?sas7bdat_read` for the reader functions and their settings.
+
+### Converting SAS to Parquet
+
+`sas7bdat_to_parquet()` streams batches into one Parquet file. `chunk_rows`
+limits rows per batch; an optional `chunk_bytes` sets an approximate decoded
+byte target. The output directory must exist, and existing files are never
+overwritten. The completed file is published only after conversion succeeds.
+
+```r
+library(anotherSAS7bdat)
+
+path <- system.file("examples", "example_rle.sas7bdat",
+                    package = "anotherSAS7bdat")
+output <- tempfile(fileext = ".parquet")
+
+result <- sas7bdat_to_parquet(
+  path,
+  output,
+  chunk_rows = 100000L,
+  compression = "snappy",
+  progress = FALSE
+)
+
+result$rows       # 120
+result$completed  # TRUE
+
+# Read back the small example file.
+sas_data <- arrow::read_parquet(output)
+head(sas_data)
+unlink(output)
+```
+
+Reading back with `arrow::read_parquet()` collects the output into R. For large
+output files, use `arrow::open_dataset(output)` to query the file without
+collecting the entire dataset.
+
+Recognized SAS dates and datetimes are converted by default; SAS times retain
+double seconds and are restored as `hms` when read into R with arrow. Column
+labels and SAS formats are retained in metadata. Set `dates = FALSE` to keep
+the original SAS numeric units. Ordinary and special numeric missing values
+become Parquet nulls; set `missing_tags = TRUE` to retain special codes in
+additional `<name>__sas_missing` columns.
+
+Set `progress = TRUE` to show a progress bar; it is enabled by default in
+interactive R sessions. See `?sas7bdat_to_parquet` for all conversion settings
+and metadata details.
 
 ## Development Note
 

@@ -4,17 +4,25 @@
 \name{anotherSAS7bdat-package}
 \alias{anotherSAS7bdat}
 \alias{anotherSAS7bdat-package}
-\title{Continuous chunk reading of SAS datasets}
+\title{anotherSAS7bdat: Read 'SAS' Data in Chunks and Convert to 'Parquet'}
 \description{
-Reads SAS 'sas7bdat' files through a persistent native reader. Processes configurable chunks without reopening the input or restarting the parser between chunks. Supports uncompressed, run-length encoded, and Ross Data Compression data through the bundled 'ReadStat' library.
+Reads 'SAS' 'sas7bdat' files through a persistent native reader. Processes configurable chunks without reopening the input or restarting the parser between chunks. Supports uncompressed, run-length encoded, and Ross Data Compression data through the bundled 'ReadStat' library. Also streams native decoded batches directly to 'Parquet' through the 'Arrow' C Data Interface and the optional 'arrow' package, without constructing R data frames.
+}
+\seealso{
+Useful links:
+\itemize{
+  \item \url{https://github.com/Fred-Wu/anotherSAS7bdat}
+  \item Report bugs at \url{https://github.com/Fred-Wu/anotherSAS7bdat/issues}
+}
+
 }
 \author{
-\strong{Maintainer}: anotherSAS7bdat contributors \email{maintainer@example.com}
+\strong{Maintainer}: Jianyun Wu \email{jianyun.fred.wu@hotmail.com}
 
 Authors:
 \itemize{
-  \item anotherSAS7bdat contributors \email{maintainer@example.com}
-  \item Evan Miller [cph] (Author of included ReadStat code)
+  \item Jianyun Wu \email{jianyun.fred.wu@hotmail.com}
+  \item Evan Miller (Author of included ReadStat code) [copyright holder]
 }
 
 }
