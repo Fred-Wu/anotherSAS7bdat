@@ -1,0 +1,68 @@
+--- a/r/R/parquet.R
++++ b/r/R/parquet.R
+@@ -219,6 +219,7 @@
+   use_deprecated_int96_timestamps = FALSE,
+   coerce_timestamps = NULL,
+   allow_truncated_timestamps = FALSE,
++  use_threads = FALSE,
+   ...
+ ) {
+   if (is.null(coerce_timestamps)) {
+@@ -232,7 +233,8 @@
+   parquet___ArrowWriterProperties___create(
+     use_deprecated_int96_timestamps = isTRUE(use_deprecated_int96_timestamps),
+     timestamp_unit = timestamp_unit,
+-    allow_truncated_timestamps = isTRUE(allow_truncated_timestamps)
++    allow_truncated_timestamps = isTRUE(allow_truncated_timestamps),
++    use_threads = isTRUE(use_threads)
+   )
+ }
+ 
+@@ -442,6 +444,13 @@
+       assert_is(batch, "RecordBatch")
+       table <- Table$create(batch)
+       self$WriteTable(table, ...)
++    },
++    NewBufferedRowGroup = function() {
++      parquet___arrow___FileWriter__NewBufferedRowGroup(self)
++    },
++    WriteRecordBatch = function(batch) {
++      assert_is(batch, "RecordBatch")
++      parquet___arrow___FileWriter__WriteRecordBatch(self, batch)
+     },
+     Close = function() parquet___arrow___FileWriter__Close(self)
+   )
+--- a/r/src/parquet.cpp
++++ b/r/src/parquet.cpp
+@@ -211,9 +211,10 @@
+ // [[parquet::export]]
+ std::shared_ptr<parquet::ArrowWriterProperties> parquet___ArrowWriterProperties___create(
+     bool allow_truncated_timestamps, bool use_deprecated_int96_timestamps,
+-    int timestamp_unit) {
++    int timestamp_unit, bool use_threads) {
+   auto builder = std::make_shared<parquet::ArrowWriterPropertiesBuilder>();
+   builder->store_schema();
++  builder->set_use_threads(use_threads);
+ 
+   if (allow_truncated_timestamps) {
+     builder->allow_truncated_timestamps();
+@@ -349,6 +350,19 @@
+ }
+ 
+ // [[parquet::export]]
++void parquet___arrow___FileWriter__NewBufferedRowGroup(
++    const std::shared_ptr<parquet::arrow::FileWriter>& writer) {
++  PARQUET_THROW_NOT_OK(writer->NewBufferedRowGroup());
++}
++
++// [[parquet::export]]
++void parquet___arrow___FileWriter__WriteRecordBatch(
++    const std::shared_ptr<parquet::arrow::FileWriter>& writer,
++    const std::shared_ptr<arrow::RecordBatch>& batch) {
++  PARQUET_THROW_NOT_OK(writer->WriteRecordBatch(*batch));
++}
++
++// [[parquet::export]]
+ void parquet___arrow___FileWriter__Close(
+     const std::shared_ptr<parquet::arrow::FileWriter>& writer) {
+   PARQUET_THROW_NOT_OK(writer->Close());
