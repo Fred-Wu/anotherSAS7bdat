@@ -25,6 +25,12 @@
 #'   in interactive R sessions and hides it when running via `Rscript`.
 #'   Progress uses the SAS row count and updates after each batch is written.
 #'   It reaches 100% only after the completed output file is published.
+#' @param writer_threads Optional experimental Parquet writer thread count. `NULL`
+#'   (default) retains the existing sequential `WriteTable()` path. `1L` uses
+#'   buffered `WriteRecordBatch()` with serial column encoding; values above 1
+#'   enable parallel column encoding. Non-`NULL` settings require the patched
+#'   Arrow R bindings described in `tools/README-threaded-parquet.md`.
+#'   Changes to Arrow's global CPU thread pool are restored on exit.
 #' @return An invisible list containing `path`, `rows`, `chunks`, `completed`,
 #'   and `missing_tag_columns`, a named mapping from numeric source columns to
 #'   their tag columns (empty when `missing_tags = FALSE`).
@@ -76,7 +82,7 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
                                chunk_bytes = NULL, columns = NULL,
                                encoding = NULL, dates = TRUE,
                                compression = "snappy", missing_tags = FALSE,
-                               progress = interactive()) {
+                               progress = interactive(), writer_threads = NULL) {
   if (!requireNamespace("arrow", quietly = TRUE)) {
     stop("Install the optional arrow package to convert to Parquet.", call. = FALSE)
   }
@@ -87,6 +93,26 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
   }
   if (!is.logical(progress) || length(progress) != 1L || is.na(progress)) {
     stop("`progress` must be TRUE or FALSE.", call. = FALSE)
+  }
+  if (!is.null(writer_threads)) {
+    if (!is.numeric(writer_threads) || length(writer_threads) != 1L ||
+        is.na(writer_threads) || !is.finite(writer_threads) ||
+        writer_threads < 1 || writer_threads != floor(writer_threads) ||
+        writer_threads > .Machine$integer.max) {
+      stop("`writer_threads` must be NULL or a positive integer.", call. = FALSE)
+    }
+    writer_threads <- as.integer(writer_threads)
+    arrow_writer_properties <- get("ParquetArrowWriterProperties", asNamespace("arrow"))
+    patched <- "use_threads" %in% names(formals(arrow_writer_properties$create)) &&
+      all(c("NewBufferedRowGroup", "WriteRecordBatch") %in%
+          names(arrow::ParquetFileWriter$public_methods))
+    if (!patched) {
+      stop("`writer_threads` requires the experimental Arrow R buffered writer bindings; see tools/README-threaded-parquet.md.", call. = FALSE)
+    }
+    if (writer_threads > 1L) {
+      previous_threads <- arrow::set_cpu_count(writer_threads)
+      on.exit(arrow::set_cpu_count(previous_threads), add = TRUE)
+    }
   }
   directory <- normalizePath(dirname(output), winslash = "/", mustWork = TRUE)
   output <- file.path(directory, basename(output))
@@ -117,14 +143,25 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
     schema$names, version = "2.6", compression = compression
   )
   sink <- arrow::FileOutputStream$create(temporary)
-  writer <- arrow::ParquetFileWriter$create(schema, sink, properties = properties)
+  if (is.null(writer_threads)) {
+    writer <- arrow::ParquetFileWriter$create(schema, sink, properties = properties)
+  } else {
+    arrow_properties <- arrow_writer_properties$create(use_threads = writer_threads > 1L)
+    writer <- arrow::ParquetFileWriter$create(
+      schema, sink, properties = properties, arrow_properties = arrow_properties)
+  }
   if (progress) progress_bar <- utils::txtProgressBar(min = 0, max = 1, style = 3)
   rows <- chunks <- 0
   repeat {
     exported <- native_arrow_next(reader$ptr, reader$chunk_rows, dates, tags)
     if (is.null(exported)) break
     batch <- arrow::RecordBatch$import_from_c(exported$array, exported$schema)
-    writer$WriteBatch(batch, chunk_size = reader$chunk_rows)
+    if (is.null(writer_threads)) {
+      writer$WriteBatch(batch, chunk_size = reader$chunk_rows)
+    } else {
+      writer$NewBufferedRowGroup()
+      writer$WriteRecordBatch(batch)
+    }
     rows <- rows + batch$num_rows
     chunks <- chunks + 1
     if (!is.null(progress_bar)) {
@@ -132,8 +169,8 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
     }
     rm(batch, exported)
     # These buffers are native allocations, invisible to R's allocation-driven
-    # GC trigger. Collect each consumed batch, including WriteBatch's temporary
-    # table wrapper, to bound memory independently of the number of batches.
+    # GC trigger. Collect each consumed batch and temporary native buffers
+    # to bound memory independently of the number of batches.
     invisible(gc(verbose = FALSE))
   }
   writer$Close()
