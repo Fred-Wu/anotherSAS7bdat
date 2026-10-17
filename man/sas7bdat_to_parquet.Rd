@@ -14,7 +14,8 @@ sas7bdat_to_parquet(
   dates = TRUE,
   compression = "snappy",
   missing_tags = FALSE,
-  progress = interactive()
+  progress = interactive(),
+  writer_threads = NULL
 )
 }
 \arguments{
@@ -59,6 +60,13 @@ bar, or \code{FALSE} to hide it. The default, \code{interactive()}, shows the ba
 in interactive R sessions and hides it when running via \code{Rscript}.
 Progress uses the SAS row count and updates after each batch is written.
 It reaches 100\% only after the completed output file is published.}
+
+\item{writer_threads}{Optional experimental Parquet writer thread count. \code{NULL}
+(default) retains the existing sequential \code{WriteTable()} path. \code{1L} uses
+buffered \code{WriteRecordBatch()} with serial column encoding; values above 1
+enable parallel column encoding. Non-\code{NULL} settings require the patched
+Arrow R bindings described in \code{tools/README-threaded-parquet.md}.
+Changes to Arrow's global CPU thread pool are restored on exit.}
 }
 \value{
 An invisible list containing \code{path}, \code{rows}, \code{chunks}, \code{completed},
