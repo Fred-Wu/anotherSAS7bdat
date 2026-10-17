@@ -155,6 +155,18 @@ Set `progress = TRUE` to show a progress bar; it is enabled by default in
 interactive R sessions. See `?sas7bdat_to_parquet` for all conversion settings
 and metadata details.
 
+### Experimental parallel Parquet writing
+
+On `feature/parquet-multithread-wide`, `sas7bdat_to_parquet()` also accepts
+`writer_threads = NULL` (original writer), `1L` (buffered serial writer),
+or `4L` and higher (buffered parallel column encoding). This experimental
+path requires a **custom Arrow R build** with additional buffered-writer
+bindings; the standard CRAN `arrow` package does not expose them.
+
+For patching instructions, correctness tests and benchmarks on wide datasets,
+see [tools/README-threaded-parquet.md](tools/README-threaded-parquet.md).
+The default path remains unchanged.
+
 ## Development Note
 
 This package was developed with assistance from GPT models using OpenAI's
