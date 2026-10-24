@@ -134,7 +134,9 @@ test_that("a later I/O error drains completed batches and closes the file", {
     }
     NULL
   }, error = function(e) conditionMessage(e))
+  expect_type(error, "character")
   expect_match(error, "Unable to read|row count")
+  expect_false(grepl("c++ exception (unknown reason)", error, fixed = TRUE))
   info <- sas7bdat_info(reader)
   expect_identical(info$status, "error")
   expect_equal(info$file_closes, 1)
