@@ -119,9 +119,10 @@ test_that("native conversion matches R adjustment across slices and missing tags
     expect_identical(converted, expected)
     for (i in 1:3) {
       expect_identical(haven::na_tag(converted[[i]]), haven::na_tag(raw[[i]]))
+      # Compare stored payloads directly; as.numeric() may transform classed NaNs.
       missing <- is.na(raw[[i]])
-      expect_identical(writeBin(as.numeric(converted[[i]])[missing], raw(), size = 8L),
-                       writeBin(as.numeric(raw[[i]])[missing], raw(), size = 8L))
+      expect_identical(writeBin(unclass(converted[[i]])[missing], raw(), size = 8L),
+                       writeBin(raw[[i]][missing], raw(), size = 8L))
     }
   }
   expect_null(sas7bdat_read_chunk(reader))
