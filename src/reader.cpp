@@ -133,7 +133,7 @@ public:
     void await_schema() {
         std::unique_lock<std::mutex> lock(mutex);
         wait_main(lock, [this] { return schema_ready || done; });
-        if (failure) std::rethrow_exception(failure);
+        if (!failure_message.empty()) throw std::runtime_error(failure_message);
         if (!schema_ready) throw std::runtime_error("SAS metadata was not available.");
     }
 
@@ -152,7 +152,8 @@ public:
                 wait_main(lock, [this] { return ready || done; });
                 if (!ready) {
                     // Completed batches remain readable before a later error.
-                    if (failure && result.rows == 0) std::rethrow_exception(failure);
+                    if (!failure_message.empty() && result.rows == 0)
+                        throw std::runtime_error(failure_message);
                     break;
                 }
                 pending.push_back(std::move(ready));
@@ -211,7 +212,7 @@ public:
     std::string status() {
         std::lock_guard<std::mutex> lock(mutex);
         if (closed) return "closed";
-        if (failure) return "error";
+        if (!failure_message.empty()) return "error";
         return done && !ready && pending.empty() ? "eof" : "open";
     }
 
@@ -238,7 +239,8 @@ private:
     std::vector<uint64_t> sample_text_bytes;
     std::vector<double> text_per_row;
     double missing_values[256];
-    std::exception_ptr failure, worker_exception;
+    std::exception_ptr worker_exception;
+    std::string failure_message;
     std::string detail;
     unistd_io_ctx_t file;
 
@@ -499,7 +501,7 @@ private:
     }
 
     void run() noexcept {
-        std::exception_ptr error;
+        std::string error_message;
         try {
             std::unique_ptr<readstat_parser_t, decltype(&readstat_parser_free)>
                 parser(readstat_parser_init(), readstat_parser_free);
@@ -523,16 +525,18 @@ private:
                 throw std::runtime_error(message);
             }
             if (!cancelled.load() && current && current->rows > 0) finish_batch();
-        } catch (...) { error = std::current_exception(); }
+        } catch (const std::exception& e) { error_message = e.what(); }
+        catch (...) { error_message = "Unknown native SAS reader failure."; }
         close_cb(this); // Also covers unexpected native exceptions.
         std::unique_lock<std::mutex> lock(mutex);
         // A failing parse never publishes a potentially incomplete current batch.
-        if (!error && !cancelled.load() && current && current->rows > 0) {
+        if (error_message.empty() && !cancelled.load() && current && current->rows > 0) {
             cv.wait(lock, [this] { return !ready || cancelled.load(); });
             if (!cancelled.load()) ready = std::move(current);
         }
         current.reset();
-        failure = error;
+        // Publish text under the mutex, not an exception_ptr across threads.
+        failure_message = std::move(error_message);
         done = true;
         cv.notify_all();
     }
