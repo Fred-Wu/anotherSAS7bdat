@@ -6,7 +6,7 @@ cc=$("${R_HOME}/bin/R" CMD config CC)
 cflags=$("${R_HOME}/bin/R" CMD config CFLAGS)
 cppflags=$("${R_HOME}/bin/R" CMD config CPPFLAGS)
 ldflags=$("${R_HOME}/bin/R" CMD config LDFLAGS)
-trap 'rm -f conftest.c conftest conftest.o' EXIT HUP INT TERM
+trap 'rm -f conftest.c conftest conftest.o; rm -rf conftest.dSYM' EXIT HUP INT TERM
 
 cat > conftest.c <<'EOF'
 #include <iconv.h>

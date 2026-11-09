@@ -1,23 +1,89 @@
 name: R-CMD-check
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
   check:
+    name: ${{ matrix.os }} / R ${{ matrix.r }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Explicit labels keep Intel and ARM coverage when macos-latest moves.
+        os: [macos-15-intel, macos-15, macos-26-intel, macos-26]
+        r: [release, oldrel-1]
+        include:
+          - {os: ubuntu-latest, r: release}
+          - {os: windows-latest, r: release}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: r-lib/actions/setup-r@v2
         with:
+          r-version: ${{ matrix.r }}
           use-public-rspm: true
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           extra-packages: any::rcmdcheck
           needs: check
+      - name: Require optional test dependencies
+        shell: Rscript {0}
+        run: |
+          stopifnot(requireNamespace("haven", quietly = TRUE))
+          stopifnot(requireNamespace("arrow", quietly = TRUE))
+          stopifnot(arrow::arrow_with_parquet())
       - uses: r-lib/actions/check-r-package@v2
         with:
           args: 'c("--no-manual", "--as-cran")'
+          upload-results: true
+          artifact-name: check-${{ matrix.os }}-${{ matrix.r }}
+
+  linux-toolchains:
+    name: ${{ matrix.distro }} / ${{ matrix.compiler }} / R-devel / Arrow ${{ matrix.arrow }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian, fedora]
+        compiler: [gcc, clang]
+        arrow: [parquet]
+        include:
+          - distro: debian
+            image: ghcr.io/r-hub/containers/debian-clang:latest
+          - distro: fedora
+            image: ghcr.io/r-hub/containers/gcc16:latest
+          # Reproduce CRAN's installed Arrow package without its C++ library.
+          - distro: debian
+            image: ghcr.io/r-hub/containers/debian-clang:latest
+            compiler: gcc
+            arrow: stub
+    container:
+      image: ${{ matrix.image }}
+    env:
+      CI_COMPILER: ${{ matrix.compiler }}
+      CI_ARROW: ${{ matrix.arrow }}
+      R_MAKEVARS_USER: /tmp/anotherSAS7bdat-ci.Makevars
+      R_LIBS_USER: /tmp/anotherSAS7bdat-ci-library
+      NOT_CRAN: 'true'
+      _R_CHECK_CRAN_INCOMING_: 'false'
+      _R_CHECK_SYSTEM_CLOCK_: 'false'
+      _R_CHECK_FORCE_SUGGESTS_: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up compiler and system dependencies
+        run: bash tools/ci/setup-linux.sh
+      - name: Install R dependencies with the selected C++ runtime
+        run: Rscript tools/ci/install-dependencies.R
+      - name: Report test environment
+        run: |
+          cat /etc/os-release
+          R --version
+          R CMD config CC
+          R CMD config CXX17
+          Rscript -e 'sessionInfo(); print(arrow::arrow_info())'
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          args: 'c("--no-manual", "--as-cran")'
+          upload-results: true
+          artifact-name: check-${{ matrix.distro }}-${{ matrix.compiler }}-${{ matrix.arrow }}

@@ -1,7 +1,8 @@
 #' Convert SAS data directly to Parquet
 #'
 #' Stream a SAS file into one Parquet file without constructing R data frames
-#' or R character vectors. Requires the optional arrow package.
+#' or R character vectors. Requires the optional arrow package with Parquet
+#' support enabled.
 #'
 #' @inheritParams sas7bdat_read
 #' @param output Path to a new local Parquet file. The parent directory must
@@ -64,7 +65,7 @@
 #' produce a valid empty Parquet file with the selected schema.
 #' @export
 #' @examples
-#' if (requireNamespace("arrow", quietly = TRUE)) {
+#' if (requireNamespace("arrow", quietly = TRUE) && arrow::arrow_with_parquet()) {
 #'   path <- system.file("examples", "example_rle.sas7bdat",
 #'                       package = "anotherSAS7bdat")
 #'   output <- tempfile(fileext = ".parquet")
@@ -79,6 +80,11 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
                                progress = interactive()) {
   if (!requireNamespace("arrow", quietly = TRUE)) {
     stop("Install the optional arrow package to convert to Parquet.", call. = FALSE)
+  }
+  if (!arrow::arrow_with_parquet()) {
+    stop(paste0("The arrow package must be installed with Parquet support. ",
+                "See https://arrow.apache.org/docs/r/articles/install.html."),
+         call. = FALSE)
   }
   scalar_string(output, "output")
   scalar_string(compression, "compression")
@@ -112,7 +118,7 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
     tags[numeric] <- names[-seq_along(fields)]
   }
   schema <- arrow::Schema$import_from_c(native_arrow_schema(reader$ptr, dates, tags))
-  schema <- parquet_r_metadata(schema, dates)
+  schema <- parquet_r_metadata(schema, dates, info$columns)
   properties <- arrow::ParquetWriterProperties$create(
     schema$names, version = "2.6", compression = compression
   )
@@ -153,17 +159,21 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
 
 # Attach column attributes once to the writer schema. Only schema metadata is
 # constructed in R; all dataset values continue through the native batch path.
-parquet_r_metadata <- function(schema, dates) {
-  columns <- lapply(schema$fields, function(field) {
-    metadata <- field$metadata
+parquet_r_metadata <- function(schema, dates, source_columns) {
+  # Field$metadata was added in Arrow 25. Build R attributes from the reader's
+  # metadata so earlier supported Arrow versions retain labels and hms times.
+  columns <- lapply(schema$names, function(name) {
+    index <- match(name, source_columns$name)
+    if (is.na(index)) return(NULL) # Extra SAS missing-tag columns.
+    column <- source_columns[index, , drop = FALSE]
     attributes <- list()
-    if (!is.null(metadata[["sas.label"]]) && nzchar(metadata[["sas.label"]])) {
-      attributes$label <- metadata[["sas.label"]]
+    if (nzchar(column$label)) {
+      attributes$label <- column$label
     }
-    if (!is.null(metadata[["sas.format"]]) && nzchar(metadata[["sas.format"]])) {
-      attributes$format.sas <- metadata[["sas.format"]]
+    if (nzchar(column$format)) {
+      attributes$format.sas <- column$format
     }
-    if (dates && identical(metadata[["sas.type"]], "time")) {
+    if (dates && column$type == "double" && sas_date_kind(column$format) == "time") {
       attributes$class <- c("hms", "difftime")
       attributes$units <- "secs"
     }

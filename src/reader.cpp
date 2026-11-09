@@ -93,6 +93,31 @@ struct Delivery {
     int rows = 0;
 };
 
+// Store diagnostics by value across callbacks/threads. Rethrowing an
+// exception_ptr can lose its std::exception type on mixed C++ runtimes.
+struct NativeError {
+    bool occurred = false;
+    std::string message;
+
+    // Called only from a catch block; even allocation failures must not unwind
+    // through a ReadStat C callback or escape the worker's noexcept entry point.
+    void capture() noexcept {
+        occurred = true;
+        try { throw; }
+        catch (const std::exception& error) {
+            try { message = error.what(); }
+            catch (...) {}
+        }
+        catch (...) {}
+    }
+
+    explicit operator bool() const noexcept { return occurred; }
+
+    [[noreturn]] void raise() const {
+        throw std::runtime_error(message.empty() ? "Unknown native SAS reader error." : message);
+    }
+};
+
 // Only the main thread creates/accesses R objects. The worker owns ReadStat,
 // its file descriptor, and the in-progress batch. One queued batch plus one
 // in-progress batch can run ahead of R. Delivered buffers return to a small
@@ -133,7 +158,7 @@ public:
     void await_schema() {
         std::unique_lock<std::mutex> lock(mutex);
         wait_main(lock, [this] { return schema_ready || done; });
-        if (failure) std::rethrow_exception(failure);
+        if (failure) failure.raise();
         if (!schema_ready) throw std::runtime_error("SAS metadata was not available.");
     }
 
@@ -152,7 +177,7 @@ public:
                 wait_main(lock, [this] { return ready || done; });
                 if (!ready) {
                     // Completed batches remain readable before a later error.
-                    if (failure && result.rows == 0) std::rethrow_exception(failure);
+                    if (failure && result.rows == 0) failure.raise();
                     break;
                 }
                 pending.push_back(std::move(ready));
@@ -238,7 +263,7 @@ private:
     std::vector<uint64_t> sample_text_bytes;
     std::vector<double> text_per_row;
     double missing_values[256];
-    std::exception_ptr failure, worker_exception;
+    NativeError failure, worker_error;
     std::string detail;
     unistd_io_ctx_t file;
 
@@ -258,7 +283,7 @@ private:
         if (cancelled.load()) return READSTAT_HANDLER_ABORT;
         try { return fn(); }
         catch (...) {
-            worker_exception = std::current_exception();
+            worker_error.capture();
             return READSTAT_HANDLER_ABORT;
         }
     }
@@ -456,7 +481,7 @@ private:
     static void error_cb(const char* message, void* context) noexcept {
         auto* self = static_cast<Reader*>(context);
         try { self->detail = message ? message : ""; }
-        catch (...) { self->worker_exception = std::current_exception(); }
+        catch (...) { self->worker_error.capture(); }
     }
 
     static int open_cb(const char* path, void* context) {
@@ -499,7 +524,7 @@ private:
     }
 
     void run() noexcept {
-        std::exception_ptr error;
+        NativeError error;
         try {
             std::unique_ptr<readstat_parser_t, decltype(&readstat_parser_free)>
                 parser(readstat_parser_init(), readstat_parser_free);
@@ -516,14 +541,14 @@ private:
             readstat_set_error_handler(parser.get(), error_cb);
             if (!encoding.empty()) readstat_set_file_character_encoding(parser.get(), encoding.c_str());
             readstat_error_t result = readstat_parse_sas7bdat(parser.get(), path.c_str(), this);
-            if (worker_exception) std::rethrow_exception(worker_exception);
+            if (worker_error) worker_error.raise();
             if (result != READSTAT_OK && !cancelled.load()) {
                 std::string message = readstat_error_message(result);
                 if (!detail.empty()) message += ": " + detail;
                 throw std::runtime_error(message);
             }
             if (!cancelled.load() && current && current->rows > 0) finish_batch();
-        } catch (...) { error = std::current_exception(); }
+        } catch (...) { error.capture(); }
         close_cb(this); // Also covers unexpected native exceptions.
         std::unique_lock<std::mutex> lock(mutex);
         // A failing parse never publishes a potentially incomplete current batch.
@@ -532,7 +557,7 @@ private:
             if (!cancelled.load()) ready = std::move(current);
         }
         current.reset();
-        failure = error;
+        failure = std::move(error);
         done = true;
         cv.notify_all();
     }
@@ -741,15 +766,17 @@ SEXP native_next(SEXP ptr, int n, bool dates) {
                 for (int j = slice.begin; j < slice.end;) {
                     reader.check_interrupt();
                     int count = std::min(16384, slice.end - j);
+                    std::memcpy(REAL(x) + dest, numbers.data() + j, count * sizeof(double));
                     if (adjust) {
                         for (int k = 0; k < count; ++k) {
-                            const double value = numbers[j + k];
-                            // Copy missing values without arithmetic to retain
-                            // the payload of SAS tagged NAs exactly.
-                            REAL(x)[dest + k] = std::isnan(value) ? value : value - epoch_offset;
+                            // Classify IEEE-754 NaNs using integer bits. A
+                            // floating-point conditional can be optimized into
+                            // arithmetic that quiets signalling NAs on macOS.
+                            uint64_t bits;
+                            std::memcpy(&bits, numbers.data() + j + k, sizeof(bits));
+                            if ((bits & 0x7fffffffffffffffULL) <= 0x7ff0000000000000ULL)
+                                REAL(x)[dest + k] = numbers[j + k] - epoch_offset;
                         }
-                    } else {
-                        std::memcpy(REAL(x) + dest, numbers.data() + j, count * sizeof(double));
                     }
                     dest += count;
                     j += count;
