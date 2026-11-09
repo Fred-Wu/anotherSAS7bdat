@@ -3,6 +3,8 @@
 * Require Arrow >= 18.1.0 for the batch writer API, and reject older versions
   before opening files. Align dependency bounds, examples, and test skips;
   check the minimum dependency set on Linux, Windows, and both macOS architectures.
+* Write an empty Parquet row group for empty SAS files so they can be read
+  back by Arrow 18.1.0 as well as newer releases.
 * Preserve the exact missing-value payload during native date and datetime
   conversion on optimized macOS builds.
 * Preserve native worker error messages across C++ runtimes, including Fedora

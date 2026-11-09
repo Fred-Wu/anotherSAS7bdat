@@ -148,6 +148,12 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
     # table wrapper, to bound memory independently of the number of batches.
     invisible(gc(verbose = FALSE))
   }
+  if (rows == 0) {
+    # Older Arrow readers cannot read a file with zero row groups. An empty
+    # native table preserves the schema without constructing R data columns.
+    writer$WriteTable(arrow::Table$create(schema = schema),
+                      chunk_size = reader$chunk_rows)
+  }
   writer$Close()
   writer <- NULL
   sink$close()

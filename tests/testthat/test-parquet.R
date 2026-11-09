@@ -159,11 +159,24 @@ test_that("schema-only files and native exports survive cleanup", {
   path <- tempfile(fileext = ".sas7bdat")
   output <- tempfile(fileext = ".parquet")
   on.exit(unlink(c(path, output)))
-  suppressWarnings(haven::write_sas(data.frame(id = numeric(), text = character()), path))
+  empty <- data.frame(id = numeric(), text = character(), day = numeric(),
+                      time = numeric(), instant = numeric())
+  attr(empty$day, "format.sas") <- "DATE9."
+  attr(empty$time, "format.sas") <- "TIME12.3"
+  attr(empty$time, "label") <- "Visit time"
+  attr(empty$instant, "format.sas") <- "DATETIME26.6"
+  suppressWarnings(haven::write_sas(empty, path))
   result <- sas7bdat_to_parquet(path, output)
   expect_equal(result$rows, 0)
   expect_equal(result$chunks, 0)
-  expect_identical(names(arrow::read_parquet(output)), c("id", "text"))
+  expect_equal(arrow::ParquetFileReader$create(output)$num_row_groups, 1)
+  restored <- arrow::read_parquet(output)
+  expect_identical(names(restored), names(empty))
+  expect_equal(nrow(restored), 0L)
+  expect_s3_class(restored$day, "Date")
+  expect_s3_class(restored$time, "hms")
+  expect_identical(attr(restored$time, "label"), "Visit time")
+  expect_s3_class(restored$instant, "POSIXct")
 
   reader <- sas7bdat_open(example_path("uncompressed"))
   on.exit(sas7bdat_close(reader), add = TRUE)
