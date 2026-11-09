@@ -27,7 +27,7 @@ test_that("SAS times display as HH:MM:SS across chunks and compression types", {
 })
 
 test_that("time conversion preserves fractions, extended hours and tagged NAs", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   # The SAS writer needs an uppercase tag in the NA payload.
   bytes <- writeBin(NA_real_, raw(), size = 8L, endian = "little")
   bytes[5L] <- charToRaw("A")
@@ -82,7 +82,7 @@ adjust_in_r <- function(x, kind) {
 }
 
 test_that("native conversion matches R adjustment across slices and missing tags", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   # SAS's writer expects uppercase tags; the reader normalizes them for haven.
   tags <- vapply(c(LETTERS, "_"), function(tag) {
     bytes <- writeBin(NA_real_, raw(), size = 8L, endian = "little")
@@ -129,7 +129,7 @@ test_that("native conversion matches R adjustment across slices and missing tags
 })
 
 test_that("formats are classified once and conversion follows the reader flag", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   formats <- c("date9.", "YYMMDD10.", "IS8601DA10.", "E8601DA10.", "NENGO.",
                "DATETIME26.6", "DATEAMPM.", "DTDATE9.", "NLDATM.", "IS8601DZ.",
                "B8601DX.", "E8601LX.", "time12.3", "HHMM.", "IS8601TM.",

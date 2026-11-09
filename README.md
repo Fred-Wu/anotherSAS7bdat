@@ -25,7 +25,8 @@ remotes::install_github("Fred-Wu/anotherSAS7bdat")
 Source installation requires Rtools on Windows, or C++ build tools on macOS
 and Linux.
 
-For SAS-to-Parquet conversion, also install **arrow** (version 14.0.0 or later):
+For SAS-to-Parquet conversion, also install **arrow** (version 18.1.0 or later,
+with Parquet support enabled):
 
 ```r
 install.packages("arrow")

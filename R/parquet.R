@@ -1,8 +1,8 @@
 #' Convert SAS data directly to Parquet
 #'
 #' Stream a SAS file into one Parquet file without constructing R data frames
-#' or R character vectors. Requires the optional arrow package with Parquet
-#' support enabled.
+#' or R character vectors. Requires the optional arrow package (>= 18.1.0)
+#' with Parquet support enabled.
 #'
 #' @inheritParams sas7bdat_read
 #' @param output Path to a new local Parquet file. The parent directory must
@@ -65,7 +65,8 @@
 #' produce a valid empty Parquet file with the selected schema.
 #' @export
 #' @examples
-#' if (requireNamespace("arrow", quietly = TRUE) && arrow::arrow_with_parquet()) {
+#' if (requireNamespace("arrow", quietly = TRUE) &&
+#'     utils::packageVersion("arrow") >= "18.1.0" && arrow::arrow_with_parquet()) {
 #'   path <- system.file("examples", "example_rle.sas7bdat",
 #'                       package = "anotherSAS7bdat")
 #'   output <- tempfile(fileext = ".parquet")
@@ -79,7 +80,12 @@ sas7bdat_to_parquet <- function(path, output, chunk_rows = 100000L,
                                compression = "snappy", missing_tags = FALSE,
                                progress = interactive()) {
   if (!requireNamespace("arrow", quietly = TRUE)) {
-    stop("Install the optional arrow package to convert to Parquet.", call. = FALSE)
+    stop("Install the optional arrow package (>= 18.1.0) to convert to Parquet.",
+         call. = FALSE)
+  }
+  if (utils::packageVersion("arrow") < "18.1.0") {
+    stop("Update the arrow package to version 18.1.0 or later to convert to Parquet.",
+         call. = FALSE)
   }
   if (!arrow::arrow_with_parquet()) {
     stop(paste0("The arrow package must be installed with Parquet support. ",

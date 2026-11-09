@@ -46,7 +46,7 @@ test_that("changing n splits and combines prefetched data without losing rows", 
 })
 
 test_that("byte limits retain row boundaries when n changes", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   input <- data.frame(id = as.double(1:200), value = rep(c(NA_real_, 3.5), 100))
@@ -78,7 +78,7 @@ test_that("byte limits retain row boundaries when n changes", {
 })
 
 test_that("empty files and callback exits clean up the native worker", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   suppressWarnings(haven::write_sas(data.frame(id = double(), text = character()), path))
@@ -124,7 +124,7 @@ test_that("worker errors retain their messages during schema setup", {
 })
 
 test_that("a later I/O error drains completed batches and closes the file", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   suppressWarnings(haven::write_sas(data.frame(id = as.double(1:10000),
@@ -159,7 +159,7 @@ test_that("a later I/O error drains completed batches and closes the file", {
 })
 
 test_that("native arenas preserve long UTF-8 text and every SAS missing tag", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   tags <- c(LETTERS, "_")
