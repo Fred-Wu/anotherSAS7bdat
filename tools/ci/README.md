@@ -7,7 +7,7 @@ All jobs fail on `R CMD check` warnings or errors and retain their check logs.
 | --- | --- | --- | --- |
 | Debian (R-hub `debian-clang` image) | devel | GCC/libstdc++ and Clang 23/libc++ | Parquet |
 | Fedora (R-hub `gcc16` image) | devel | GCC/libstdc++ and Clang/libc++ | Parquet |
-| Debian, GCC | devel | GCC/libstdc++ | Installed without libarrow |
+| Debian, GCC | devel | GCC/libstdc++ | Built without Parquet |
 | macOS 15 and 26, Intel and ARM | release and oldrel-1 | Apple Clang/libc++ | Parquet |
 | Ubuntu and Windows | release | Runner default | Parquet |
 
@@ -19,15 +19,15 @@ Linux jobs print their OS, R, compiler configuration, and Arrow capabilities.
 
 Linux dependencies, including Rcpp, haven, and Arrow, are built from source with
 the selected compiler. Clang explicitly uses libc++, as on CRAN's Fedora Clang
-machine. The Parquet jobs require working Parquet support; the separate stub job
-requires Arrow to load without it. This prevents an unsuccessful Arrow build
+machine. The Parquet jobs require working Parquet support; the separate no-Parquet job
+requires Arrow to load without Parquet. This prevents an unsuccessful Arrow build
 from silently skipping all Parquet tests in a full-feature job.
 
 The container scripts can also run locally in the corresponding R-hub image:
 
 ```sh
 export CI_COMPILER=clang       # gcc or clang
-export CI_ARROW=parquet        # parquet or stub
+export CI_ARROW=parquet        # parquet or no-parquet
 export R_MAKEVARS_USER=/tmp/anotherSAS7bdat-ci.Makevars
 export R_LIBS_USER=/tmp/anotherSAS7bdat-ci-library
 bash tools/ci/setup-linux.sh

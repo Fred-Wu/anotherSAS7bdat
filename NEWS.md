@@ -10,4 +10,4 @@
   which do not expose field metadata in R.
 * Remove macOS debug bundles created by configure's compiler probes.
 * Expand CI to Debian and Fedora with GCC and Clang, an Arrow installation
-  without libarrow, and current/previous R releases on Intel and ARM macOS.
+  without Parquet support, and current/previous R releases on Intel and ARM macOS.
