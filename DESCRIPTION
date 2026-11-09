@@ -1,6 +1,6 @@
 Package: anotherSAS7bdat
 Title: Read 'SAS' Data in Chunks and Convert to 'Parquet'
-Version: 0.0.8
+Version: 0.0.9
 Authors@R: c(
     person("Jianyun", "Wu", role = c("aut", "cre"),
         email = "jianyun.fred.wu@hotmail.com"),

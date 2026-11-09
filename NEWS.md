@@ -1,18 +1,16 @@
-# anotherSAS7bdat 0.0.8
+# anotherSAS7bdat 0.0.9
 
-* Require Arrow >= 18.1.0 for the batch writer API, and reject older versions
-  before opening files. Align dependency bounds, examples, and test skips;
-  check the minimum dependency set on Linux, Windows, and both macOS architectures.
-* Write an empty Parquet row group for empty SAS files so they can be read
-  back by Arrow 18.1.0 as well as newer releases.
-* Preserve the exact missing-value payload during native date and datetime
-  conversion on optimized macOS builds.
-* Preserve native worker error messages across C++ runtimes, including Fedora
-  Clang/libc++, without transferring stored exception objects.
-* Detect Arrow installations without Parquet support before conversion, and
-  skip Parquet examples and integration tests when that capability is absent.
-* Restore Parquet column labels and `hms` times with Arrow versions before 25,
-  which do not expose field metadata in R.
-* Remove macOS debug bundles created by configure's compiler probes.
-* Expand CI to Debian and Fedora with GCC and Clang, an Arrow installation
-  without Parquet support, and current/previous R releases on Intel and ARM macOS.
+* Fixed date and datetime conversion on macOS so missing values and SAS
+  special missing codes are preserved exactly.
+* Fixed file-reading errors that appeared as "C++ exception (unknown reason)"
+  on some systems. These errors now show the underlying problem.
+* Fixed missing column labels, SAS formats, and time display when reading
+  converted Parquet files into R with Arrow versions earlier than 25.
+* Fixed conversion of empty SAS files so the resulting Parquet files can be
+  read by Arrow 18.1.0 as well as newer versions.
+* Parquet conversion now requires Arrow 18.1.0 or later with Parquet support.
+  If either requirement is missing, conversion stops with a clear message
+  before opening files. Reading SAS files into R does not require Arrow.
+* The minimum required versions are now Rcpp 1.0.14 and hms 0.5.0. Running
+  the package tests requires testthat 3.3.0; tests that use haven require
+  haven 2.5.5. R 4.1.0 remains the minimum supported R version.
