@@ -83,6 +83,10 @@ jobs:
           # All our optional test packages are pinned above. Do not install
           # their own Suggests (e.g. DuckDB, which no longer supports R 4.1).
           dependencies: '"hard"'
+          # No vignettes need these tools. Auto-detection resolves current
+          # Arrow again without our pin, which cannot install on R 4.1.
+          install-pandoc: false
+          install-quarto: false
           needs: check
       - name: Verify exact minimum versions and Parquet support
         run: Rscript tools/ci/verify-minimum-dependencies.R
