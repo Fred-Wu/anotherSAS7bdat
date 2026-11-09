@@ -80,6 +80,9 @@ jobs:
             testthat@3.3.0
             haven@2.5.5
             arrow@18.1.0
+          # All our optional test packages are pinned above. Do not install
+          # their own Suggests (e.g. DuckDB, which no longer supports R 4.1).
+          dependencies: '"hard"'
           needs: check
       - name: Verify exact minimum versions and Parquet support
         run: Rscript tools/ci/verify-minimum-dependencies.R
