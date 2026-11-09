@@ -13,7 +13,7 @@ if command -v apt-get >/dev/null; then
   apt-get update
   apt-get install -y gcc g++ gfortran cmake ninja-build pkg-config \
     libcurl4-openssl-dev libssl-dev libxml2-dev libgit2-dev zlib1g-dev \
-    libbz2-dev liblzma-dev libzstd-dev libicu-dev
+    libbz2-dev liblzma-dev libzstd-dev libicu-dev libuv1-dev
   # The Debian R-hub image already supplies LLVM and libc++ 23.
   clang_cc=clang-23
   clang_cxx=clang++-23
@@ -21,7 +21,7 @@ elif command -v dnf >/dev/null; then
   dnf install -y gcc gcc-c++ gcc-gfortran clang libcxx-devel libcxxabi-devel \
     cmake ninja-build pkgconf-pkg-config libcurl-devel openssl-devel \
     libxml2-devel libgit2-devel zlib-devel bzip2-devel xz-devel \
-    libzstd-devel libicu-devel
+    libzstd-devel libicu-devel libuv-devel
   clang_cc=clang
   clang_cxx=clang++
 else
