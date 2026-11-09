@@ -67,7 +67,8 @@ their tag columns (empty when \code{missing_tags = FALSE}).
 }
 \description{
 Stream a SAS file into one Parquet file without constructing R data frames
-or R character vectors. Requires the optional arrow package.
+or R character vectors. Requires the optional arrow package (>= 18.1.0)
+with Parquet support enabled.
 }
 \details{
 Native decoded batches are exported through the Arrow C Data Interface.
@@ -105,7 +106,8 @@ close the reader and remove the incomplete temporary output. Empty SAS files
 produce a valid empty Parquet file with the selected schema.
 }
 \examples{
-if (requireNamespace("arrow", quietly = TRUE)) {
+if (requireNamespace("arrow", quietly = TRUE) &&
+    utils::packageVersion("arrow") >= "18.1.0" && arrow::arrow_with_parquet()) {
   path <- system.file("examples", "example_rle.sas7bdat",
                       package = "anotherSAS7bdat")
   output <- tempfile(fileext = ".parquet")

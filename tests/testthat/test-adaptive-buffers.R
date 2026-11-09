@@ -1,5 +1,5 @@
 test_that("automatic bytes keep sampled rows in full output chunks", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   input <- data.frame(id = as.double(1:1500),
@@ -24,7 +24,7 @@ test_that("automatic bytes keep sampled rows in full output chunks", {
 })
 
 test_that("the text estimate adapts when later rows become wider", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   input <- data.frame(id = as.double(1:1536),
@@ -55,7 +55,7 @@ test_that("the text estimate adapts when later rows become wider", {
 })
 
 test_that("sampling crosses small chunks and respects changing n", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   input <- data.frame(id = as.double(1:1000), text = rep("hello", 1000))
@@ -74,7 +74,7 @@ test_that("sampling crosses small chunks and respects changing n", {
 })
 
 test_that("explicit byte limits remain in force after estimating wide rows", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   input <- data.frame(id = as.double(1:600), text = rep(strrep("x", 1500), 600))
@@ -96,7 +96,7 @@ test_that("short and empty compressed files require no extra sample reads", {
     expect_equal(result$info$file_opens, 1)
     expect_equal(result$info$file_closes, 1)
   }
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   suppressWarnings(haven::write_sas(data.frame(id = double()), path))
@@ -108,7 +108,7 @@ test_that("short and empty compressed files require no extra sample reads", {
 })
 
 test_that("numeric-only estimates use selected columns", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   on.exit(unlink(path))
   input <- data.frame(id = as.double(1:600), value = rep(3.5, 600),

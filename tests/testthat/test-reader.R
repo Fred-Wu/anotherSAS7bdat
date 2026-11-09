@@ -14,7 +14,7 @@ test_that("readable byte targets have explicit binary and decimal units", {
 })
 
 test_that("many pages, tagged missings, UTF-8 paths and labels survive chunking", {
-  skip_if_not_installed("haven")
+  skip_if_not_installed("haven", "2.5.5")
   path <- paste0(tempfile(), "-\u6d4b\u8bd5.sas7bdat")
   # SAS's writer accepts uppercase tags, whereas haven::tagged_na() lowercases
   # them. Construct the documented tagged-NA payload for this generated file.

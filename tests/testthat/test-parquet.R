@@ -1,5 +1,28 @@
+test_that("R metadata does not require Arrow field metadata accessors", {
+  # Arrow < 25 has schema metadata but no Field$metadata accessor.
+  schema <- list(
+    names = c("time", "text", "time__sas_missing"),
+    metadata = list(sas.label = "A labelled file"),
+    WithMetadata = identity
+  )
+  columns <- data.frame(name = c("time", "text"),
+                        type = c("double", "character"),
+                        format = c("TIME12.3", "TIME12.3"),
+                        label = c("Visit time", "Text label"))
+  metadata <- anotherSAS7bdat:::parquet_r_metadata(schema, TRUE, columns)
+  expect_identical(metadata$r$columns$time$attributes,
+                   list(label = "Visit time", format.sas = "TIME12.3",
+                        class = c("hms", "difftime"), units = "secs"))
+  expect_null(metadata$r$columns$text$attributes$class)
+  expect_null(metadata$r$columns$time__sas_missing)
+  expect_identical(metadata$r$attributes$label, "A labelled file")
+  metadata <- anotherSAS7bdat:::parquet_r_metadata(schema, FALSE, columns)
+  expect_null(metadata$r$columns$time$attributes$class)
+})
+
 test_that("native Parquet conversion matches all three SAS compression types", {
-  skip_if_not_installed("arrow", "14.0.0")
+  skip_if_not_installed("arrow", "18.1.0")
+  skip_if_not(arrow::arrow_with_parquet(), "Arrow was built without Parquet support")
   for (compression in c("uncompressed", "rle", "rdc")) {
     path <- example_path(compression)
     output <- tempfile(fileext = ".parquet")
@@ -23,8 +46,11 @@ test_that("native Parquet conversion matches all three SAS compression types", {
     for (name in names(expected)) {
       field <- table$schema$GetFieldByName(name)
       metadata <- collected$info$columns[match(name, collected$info$columns$name), ]
-      expect_identical(field$metadata[["sas.label"]], metadata$label)
-      expect_identical(field$metadata[["sas.format"]], metadata$format)
+      # Older Arrow versions retain field metadata but cannot inspect it in R.
+      if ("metadata" %in% names(field)) {
+        expect_identical(field$metadata[["sas.label"]], metadata$label)
+        expect_identical(field$metadata[["sas.format"]], metadata$format)
+      }
       expect_identical(attr(actual[[name]], "label"),
                        if (nzchar(metadata$label)) metadata$label else NULL)
       expect_identical(attr(actual[[name]], "format.sas"),
@@ -36,7 +62,8 @@ test_that("native Parquet conversion matches all three SAS compression types", {
 })
 
 test_that("direct conversion never constructs R dataset columns", {
-  skip_if_not_installed("arrow", "14.0.0")
+  skip_if_not_installed("arrow", "18.1.0")
+  skip_if_not(arrow::arrow_with_parquet(), "Arrow was built without Parquet support")
   output <- tempfile(fileext = ".parquet")
   on.exit(unlink(output))
   local_mocked_bindings(
@@ -54,8 +81,9 @@ test_that("direct conversion never constructs R dataset columns", {
 })
 
 test_that("special missing tags and temporal edge cases are preserved explicitly", {
-  skip_if_not_installed("arrow", "14.0.0")
-  skip_if_not_installed("haven")
+  skip_if_not_installed("arrow", "18.1.0")
+  skip_if_not(arrow::arrow_with_parquet(), "Arrow was built without Parquet support")
+  skip_if_not_installed("haven", "2.5.5")
   sas_tags <- vapply(c(LETTERS, "_"), function(tag) {
     bytes <- writeBin(NA_real_, raw(), size = 8L, endian = "little")
     bytes[5L] <- charToRaw(tag)
@@ -102,8 +130,9 @@ test_that("special missing tags and temporal edge cases are preserved explicitly
 })
 
 test_that("date precision checks leave no incomplete published output", {
-  skip_if_not_installed("arrow", "14.0.0")
-  skip_if_not_installed("haven")
+  skip_if_not_installed("arrow", "18.1.0")
+  skip_if_not(arrow::arrow_with_parquet(), "Arrow was built without Parquet support")
+  skip_if_not_installed("haven", "2.5.5")
   input <- data.frame(day = c(3653, 3653.125), instant = c(0.125, 0.000000125))
   attr(input$day, "format.sas") <- "DATE9."
   attr(input$instant, "format.sas") <- "DATETIME26.6"
@@ -124,16 +153,30 @@ test_that("date precision checks leave no incomplete published output", {
 })
 
 test_that("schema-only files and native exports survive cleanup", {
-  skip_if_not_installed("arrow", "14.0.0")
-  skip_if_not_installed("haven")
+  skip_if_not_installed("arrow", "18.1.0")
+  skip_if_not(arrow::arrow_with_parquet(), "Arrow was built without Parquet support")
+  skip_if_not_installed("haven", "2.5.5")
   path <- tempfile(fileext = ".sas7bdat")
   output <- tempfile(fileext = ".parquet")
   on.exit(unlink(c(path, output)))
-  suppressWarnings(haven::write_sas(data.frame(id = numeric(), text = character()), path))
+  empty <- data.frame(id = numeric(), text = character(), day = numeric(),
+                      time = numeric(), instant = numeric())
+  attr(empty$day, "format.sas") <- "DATE9."
+  attr(empty$time, "format.sas") <- "TIME12.3"
+  attr(empty$time, "label") <- "Visit time"
+  attr(empty$instant, "format.sas") <- "DATETIME26.6"
+  suppressWarnings(haven::write_sas(empty, path))
   result <- sas7bdat_to_parquet(path, output)
   expect_equal(result$rows, 0)
   expect_equal(result$chunks, 0)
-  expect_identical(names(arrow::read_parquet(output)), c("id", "text"))
+  expect_equal(arrow::ParquetFileReader$create(output)$num_row_groups, 1)
+  restored <- arrow::read_parquet(output)
+  expect_identical(names(restored), names(empty))
+  expect_equal(nrow(restored), 0L)
+  expect_s3_class(restored$day, "Date")
+  expect_s3_class(restored$time, "hms")
+  expect_identical(attr(restored$time, "label"), "Visit time")
+  expect_s3_class(restored$instant, "POSIXct")
 
   reader <- sas7bdat_open(example_path("uncompressed"))
   on.exit(sas7bdat_close(reader), add = TRUE)
@@ -149,7 +192,8 @@ test_that("schema-only files and native exports survive cleanup", {
 })
 
 test_that("writer and decoder errors clean up temporary Parquet files", {
-  skip_if_not_installed("arrow", "14.0.0")
+  skip_if_not_installed("arrow", "18.1.0")
+  skip_if_not(arrow::arrow_with_parquet(), "Arrow was built without Parquet support")
   directory <- tempfile()
   dir.create(directory)
   on.exit(unlink(directory, recursive = TRUE))
@@ -175,7 +219,8 @@ test_that("writer and decoder errors clean up temporary Parquet files", {
 })
 
 test_that("Parquet progress reports written batches and successful completion", {
-  skip_if_not_installed("arrow", "14.0.0")
+  skip_if_not_installed("arrow", "18.1.0")
+  skip_if_not(arrow::arrow_with_parquet(), "Arrow was built without Parquet support")
   output <- tempfile(fileext = ".parquet")
   quiet_output <- tempfile(fileext = ".parquet")
   on.exit(unlink(c(output, quiet_output)))
@@ -196,7 +241,8 @@ test_that("Parquet progress reports written batches and successful completion", 
 })
 
 test_that("a writer failure does not publish a partial file", {
-  skip_if_not_installed("arrow", "14.0.0")
+  skip_if_not_installed("arrow", "18.1.0")
+  skip_if_not(arrow::arrow_with_parquet(), "Arrow was built without Parquet support")
   directory <- tempfile()
   dir.create(directory)
   on.exit(unlink(directory, recursive = TRUE))
@@ -209,4 +255,40 @@ test_that("a writer failure does not publish a partial file", {
   }, .package = "anotherSAS7bdat")
   expect_error(sas7bdat_to_parquet(example_path("rle"), output), "[Ss]chema")
   expect_length(list.files(directory, all.files = TRUE, no.. = TRUE), 0)
+})
+
+test_that("unsupported Arrow versions fail before checking capabilities or opening files", {
+  skip_if_not_installed("arrow", "18.1.0")
+  original_version <- utils::packageVersion
+  local_mocked_bindings(packageVersion = function(pkg, ...) {
+    if (identical(pkg, "arrow")) return(package_version("17.0.0.1"))
+    original_version(pkg, ...)
+  }, .package = "utils")
+  local_mocked_bindings(
+    arrow_with_parquet = function() stop("Arrow capabilities should not be checked"),
+    .package = "arrow"
+  )
+  local_mocked_bindings(
+    native_open = function(...) stop("The SAS reader should not be opened"),
+    .package = "anotherSAS7bdat"
+  )
+  output <- tempfile(fileext = ".parquet")
+  on.exit(unlink(output), add = TRUE)
+  expect_error(sas7bdat_to_parquet(example_path("rle"), output),
+               "Update the arrow package to version 18.1.0 or later", fixed = TRUE)
+  expect_false(file.exists(output))
+})
+
+test_that("Arrow without Parquet support fails before opening files", {
+  skip_if_not_installed("arrow", "18.1.0")
+  local_mocked_bindings(arrow_with_parquet = function() FALSE, .package = "arrow")
+  local_mocked_bindings(
+    native_open = function(...) stop("The SAS reader should not be opened"),
+    .package = "anotherSAS7bdat"
+  )
+  output <- tempfile(fileext = ".parquet")
+  on.exit(unlink(output), add = TRUE)
+  expect_error(sas7bdat_to_parquet(example_path("rle"), output),
+               "arrow package must be installed with Parquet support", fixed = TRUE)
+  expect_false(file.exists(output))
 })
