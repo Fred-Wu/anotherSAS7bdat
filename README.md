@@ -15,7 +15,13 @@ constructing intermediate R data frames or collecting the whole dataset.
 
 ## Installation
 
-Install the development version from GitHub:
+Install the released version from [CRAN](https://CRAN.R-project.org/package=anotherSAS7bdat):
+
+```r
+install.packages("anotherSAS7bdat")
+```
+
+Or install the development version from GitHub:
 
 ```r
 # install.packages("remotes")

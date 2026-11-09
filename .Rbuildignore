@@ -1,5 +1,6 @@
 ^\.work$
 ^tools$
+^LICENSE\.md$
 ^\.git.*$
 ^.*\.Rcheck$
 ^.*\.tar\.gz$
